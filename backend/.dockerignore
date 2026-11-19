@@ -1,0 +1,30 @@
+# 根目录后端 Docker 构建的排除规则；不影响 Git 跟踪。
+.git
+.env
+.env.*
+# 排除本地密钥，仅保留需要打包的登录公钥。
+**/*.pem
+!src/main/resources/rsa/public_key.pem
+# 编译在镜像内完成，不复制宿主机产物或 Maven 缓存。
+target
+**/target
+.m2*
+.codex-test-tmp
+# 运行数据通过容器挂载提供，不写入镜像。
+logs
+data
+secrets
+*.log
+# 产品文档不参与应用编译。
+docs
+# 开发协作资料、编辑器配置和本地工具缓存不参与后端镜像构建。
+.agents
+.codex
+.trellis
+.idea
+.vscode
+**/__pycache__
+**/*.pyc
+.DS_Store
+Thumbs.db
+Desktop.ini

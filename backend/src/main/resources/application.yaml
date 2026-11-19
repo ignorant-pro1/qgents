@@ -1,0 +1,239 @@
+# 后端运行配置。${变量:默认值} 允许环境覆盖；未写默认值的变量需由运行环境提供。
+# 本地从仓库根目录启动，Docker 部署由 Compose 注入连接地址和容器内路径。
+spring:
+  # 按 properties 格式读取工作目录下的 .env；optional 表示允许文件不存在。
+  config:
+    import: optional:file:.env[.properties]
+  ai:
+    openai:
+      # 通过 DeepSeek 的 OpenAI 兼容接口调用模型。
+      api-key: ${DEEPSEEK_API_KEY}
+      base-url: ${AI_BASE_URL:https://api.deepseek.com}
+      chat:
+        options:
+          model: ${AI_MODEL:deepseek-flash}
+          temperature: 0.2
+          # 非流式响应需等待生成结束；限制输出长度以控制响应耗时。
+          max-tokens: ${AI_MAX_TOKENS:4096}
+  application:
+    name: Qgents
+  # MySQL：本地使用映射端口 13306，生产 Compose 使用服务名 mysql 和容器端口 3306。
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    # 连接池：以下超时均为毫秒，pool-size / minimum-idle 为连接数。
+    hikari:
+      connection-timeout: ${DB_CONNECTION_TIMEOUT:10000}
+      validation-timeout: ${DB_VALIDATION_TIMEOUT:2000}
+      maximum-pool-size: ${DB_MAX_POOL_SIZE:20}
+      minimum-idle: ${DB_MIN_IDLE:5}
+      # 此值应小于数据库或网络设备的连接空闲回收时间，避免复用已断开的连接。
+      max-lifetime: ${DB_MAX_LIFETIME:1800000}
+      idle-timeout: ${DB_IDLE_TIMEOUT:600000}
+      leak-detection-threshold: ${DB_LEAK_DETECTION_THRESHOLD:60000}
+      connection-test-query: SELECT 1
+  # Redis：本地端口由 .env 指向 16379；生产 Compose 覆盖为 redis:6379。
+  data:
+    redis:
+      host: ${REDIS_HOST}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      database: ${REDIS_DATABASE:0}
+      timeout: 3s
+  # SMTP 邮件：当前启用 SSL，默认 465 端口；三个底层超时参数单位均为毫秒。
+  mail:
+    host: ${SMTP_HOST:smtp.qq.com}
+    port: ${SMTP_PORT:465}
+    username: ${SMTP_USERNAME}
+    password: ${SMTP_AUTH_CODE}
+    properties:
+      mail.smtp.auth: true
+      mail.smtp.ssl.enable: true
+      mail.smtp.connectiontimeout: 5000
+      mail.smtp.timeout: 5000
+      mail.smtp.writetimeout: 5000
+
+# 日志文件路径；滚动、保留和 ERROR 分流规则见同目录 logback-spring.xml。
+logging:
+  file:
+    name: ${LOG_FILE:logs/qgents.log}
+
+app:
+  # 所有 Agent 共用工具循环；普通文本回复结束，不强制工具调用。
+  agent:
+    # 每次 Agent loop 的最大轮次，防止工具调用无限继续。
+    max-rounds: ${APP_AGENT_MAX_ROUNDS:30}
+    # 同一步中已声明可并行工具的最大在途数；1 表示串行执行。
+    max-parallel-tool-calls: ${APP_AGENT_MAX_PARALLEL_TOOL_CALLS:4}
+    # 每个根运行同时活跃的子 Agent 数量上限。
+    max-subagents: ${APP_AGENT_MAX_SUBAGENTS:8}
+    # 每个项目的 Agent 数量上限，含默认 Agent 与待审批申请；被拒绝的申请不占名额。
+    max-per-project: ${APP_AGENT_MAX_PER_PROJECT:10}
+    context:
+      # 三种记忆（项目 / 群 / Agent 私有）注入 Agent 上下文的字符上限；超过时拒绝写入。
+      max-memory-chars: ${APP_AGENT_CONTEXT_MAX_MEMORY_CHARS:12000}
+  # 群记忆后台提炼：新消息数与闲置时长同时达到才触发，失败有限重试；阈值均可在环境覆盖。
+  memory:
+    group:
+      # 自上次提炼以来至少新增的消息条数（含 Agent 回复）。
+      min-messages: ${APP_MEMORY_GROUP_MIN_MESSAGES:20}
+      # 群内最后一次消息后需要静默的分钟数。
+      idle-minutes: ${APP_MEMORY_GROUP_IDLE_MINUTES:15}
+      # 扫描周期，支持 s/m/h 时长写法。
+      scan-interval: ${APP_MEMORY_GROUP_SCAN_INTERVAL:1m}
+      # 失败后再次尝试的最短间隔（分钟），与最大重试次数一起限制重复失败。
+      retry-delay-minutes: ${APP_MEMORY_GROUP_RETRY_DELAY_MINUTES:5}
+      max-attempts: ${APP_MEMORY_GROUP_MAX_ATTEMPTS:3}
+      # RUNNING 超过该分钟数视为上次进程中断，允许重新领取。
+      stale-claim-minutes: ${APP_MEMORY_GROUP_STALE_CLAIM_MINUTES:30}
+      # 单次提炼最多送入的消息条数，剩余消息留到下一次。
+      max-messages-per-run: ${APP_MEMORY_GROUP_MAX_MESSAGES_PER_RUN:200}
+      # 扫描按键游标翻页读取，每页群数；每轮覆盖全部群，不会漏掉新活动的群。
+      scan-page-size: ${APP_MEMORY_GROUP_SCAN_PAGE_SIZE:20}
+    # 项目记忆发现：后台按周期从项目默认群的群记忆里找项目背景和决策，再以默认 Agent 的普通消息提出更新建议。
+    discovery:
+      # 扫描周期，支持 s/m/h 时长写法。
+      scan-interval: ${APP_MEMORY_DISCOVERY_SCAN_INTERVAL:1h}
+      # 同一来源群两次发现之间的最短间隔（分钟）。
+      interval-minutes: ${APP_MEMORY_DISCOVERY_INTERVAL_MINUTES:1440}
+      # 发现失败后再次尝试的最短间隔（分钟），与最大重试次数一起限制重复失败。
+      retry-delay-minutes: ${APP_MEMORY_DISCOVERY_RETRY_DELAY_MINUTES:60}
+      max-attempts: ${APP_MEMORY_DISCOVERY_MAX_ATTEMPTS:3}
+      # 单次扫描最多处理的来源群数。
+      batch-size: ${APP_MEMORY_DISCOVERY_BATCH_SIZE:10}
+  # 项目持久目录根；每个项目一个子目录，存放 memory.md、groups/ 下的群记忆、共享 Git 数据和各 Workspace 工作树。
+  # docker-host-root 指向同一份数据的宿主机路径，用于创建沙箱 bind mount。
+  project:
+    root: ${PROJECT_DATA_ROOT:./data/projects}
+    docker-host-root: ${PROJECT_DATA_DOCKER_HOST_ROOT:${PROJECT_DATA_ROOT:./data/projects}}
+  # 邮件中的页面入口；web/mobile 地址还用于 GitHub App 授权后的跳转。
+  frontend-url: ${FRONTEND_URL:http://localhost:5173}
+  frontend-url-web: ${FRONTEND_URL_WEB:${FRONTEND_URL:http://localhost:5173}}
+  frontend-url-mobile: ${FRONTEND_URL_MOBILE:${FRONTEND_URL:http://localhost:5173}}
+  # 浏览器跨域来源，多个来源用逗号分隔。
+  cors-allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:5173,http://127.0.0.1:5173}
+  # RSA 解密登录密码；key-id、公钥与前端配置保持一致。JWT 用于登录后的会话令牌。
+  rsa-private-key: ${RSA_PRIVATE_KEY_PATH:file:./src/main/resources/rsa/private_key.pem}
+  rsa-key-id: ${RSA_KEY_ID:rsa-2026-08}
+  jwt-secret: ${JWT_SECRET}
+  # access/reset 令牌有效期以分钟计，refresh 令牌以天计。
+  access-token-minutes: ${ACCESS_TOKEN_MINUTES:15}
+  refresh-token-days: ${REFRESH_TOKEN_DAYS:30}
+  reset-token-minutes: ${RESET_TOKEN_MINUTES:30}
+  # 本地附件目录相对应用工作目录解析；上传凭证有效期单位为秒。
+  attachment-local-root: ${ATTACHMENT_LOCAL_ROOT:./data/attachments}
+  attachment-upload-expiry-seconds: ${ATTACHMENT_UPLOAD_EXPIRY_SECONDS:900}
+  # 附件大小上限（字节，默认 50 MiB）与临时下载地址有效期（秒，默认 900）
+  attachment-max-size-bytes: ${APP_ATTACHMENT_MAX_SIZE_BYTES:52428800}
+
+# 开启 OSS 后附件由浏览器直传，endpoint 须可公开访问并配置 Bucket CORS；头像另需 public-base-url。
+aliyun:
+  oss:
+    enabled: ${ALIYUN_OSS_ENABLED:false}
+    endpoint: ${ALIYUN_OSS_ENDPOINT:}
+    bucket-name: ${ALIYUN_OSS_BUCKET_NAME:}
+    access-key-id: ${ALIYUN_OSS_ACCESS_KEY_ID:}
+    access-key-secret: ${ALIYUN_OSS_ACCESS_KEY_SECRET:}
+    # OSS 临时签名有效期，单位为秒。
+    presign-expiry-seconds: ${ALIYUN_OSS_PRESIGN_EXPIRY_SECONDS:900}
+    public-base-url: ${ALIYUN_OSS_PUBLIC_BASE_URL:}
+
+# Swagger UI 入口；接口文档从控制器定义生成。
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+
+# 运维端口与业务端口 8080 分离；本地仅监听回环地址，生产配置由 Compose 覆盖。
+management:
+  server:
+    port: ${MANAGEMENT_SERVER_PORT:8081}
+    address: ${MANAGEMENT_SERVER_ADDRESS:127.0.0.1}
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: never
+
+qgents:
+  # 后端 Agent 执行线程池：线程数和排队容量，与模型单步工具并行数分别配置。
+  executor:
+    agent:
+      core-size: ${QGENTS_AGENT_CORE_SIZE:2}
+      max-size: ${QGENTS_AGENT_MAX_SIZE:4}
+      queue-capacity: ${QGENTS_AGENT_QUEUE_CAPACITY:100}
+  push:
+    # 移动端 FCM HTTP v1 离线推送默认关闭；服务账号密钥只允许由受控环境变量注入。
+    enabled: ${QGENTS_PUSH_ENABLED:false}
+    fcm-endpoint: ${QGENTS_PUSH_FCM_ENDPOINT:https://fcm.googleapis.com/v1/projects}
+    fcm-project-id: ${QGENTS_PUSH_FCM_PROJECT_ID:}
+    fcm-service-account-json-base64: ${QGENTS_PUSH_FCM_SERVICE_ACCOUNT_JSON_BASE64:}
+    token-encryption-key: ${QGENTS_PUSH_TOKEN_ENCRYPTION_KEY:}
+    # 推送最多尝试次数；待发送记录扫描间隔单位为毫秒。
+    max-attempts: ${QGENTS_PUSH_MAX_ATTEMPTS:5}
+    poll-interval-ms: ${QGENTS_PUSH_POLL_INTERVAL_MS:5000}
+
+# 数据库映射：下划线列名映射到 Java 驼峰属性。
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+    # 状态枚举按名字与 VARCHAR 列互转，不依赖 @EnumValue。
+    default-enum-type-handler: org.apache.ibatis.type.EnumTypeHandler
+    log-impl: org.apache.ibatis.logging.slf4j.Slf4jImpl
+
+# 可选 GitHub App 配置；应用 ID、私钥用于生成安装凭证，webhook-secret 用于事件验签。
+github:
+  app:
+    app-id: ${GITHUB_APP_ID:}
+    slug: ${GITHUB_APP_SLUG:}
+    private-key-path: ${GITHUB_APP_PRIVATE_KEY_PATH:}
+    webhook-secret: ${GITHUB_WEBHOOK_SECRET:}
+
+# 进程内 Sandbox 模块；用户命令仍在 Docker 容器中执行。
+sandbox:
+  runtime: ${SANDBOX_RUNTIME:docker}
+  # 新建沙箱使用 images 中的配置名；对应镜像需提前构建或拉取。
+  image-profile: ${SANDBOX_IMAGE_PROFILE:dev-tools}
+  # 租约续租、空闲回收与执行超时均支持 s/m/h 单位；default 为默认值，max 为上限。
+  lease-renew-interval: ${SANDBOX_LEASE_RENEW_INTERVAL:10s}
+  default-idle-ttl: ${SANDBOX_DEFAULT_IDLE_TTL:30m}
+  max-idle-ttl: ${SANDBOX_MAX_IDLE_TTL:2h}
+  # 从创建时刻计算的总存活时间，与空闲时间分别限制。
+  default-max-lifetime: ${SANDBOX_DEFAULT_MAX_LIFETIME:4h}
+  max-lifetime: ${SANDBOX_MAX_LIFETIME:12h}
+  # 单条命令的执行时间限制。
+  default-execution-timeout: ${SANDBOX_DEFAULT_EXECUTION_TIMEOUT:15m}
+  max-execution-timeout: ${SANDBOX_MAX_EXECUTION_TIMEOUT:1h}
+  cleanup-interval: ${SANDBOX_CLEANUP_INTERVAL:30s}
+  # 长命令执行线程池大小，不是 Agent 数量或沙箱容器数量上限。
+  execution-threads: ${SANDBOX_EXECUTION_THREADS:4}
+  # Linux 使用 Unix socket；Windows Docker Desktop 的 named pipe 地址见 .env.example。
+  docker-host: ${SANDBOX_DOCKER_HOST:unix:///var/run/docker.sock}
+  # 标识管理沙箱的后端实例，用于容器归属。
+  instance-id: ${SANDBOX_INSTANCE_ID:local}
+  # 后端进程可见的工作区路径。
+  # Docker 宿主机可见的同一工作区，用于 bind mount；容器部署时与上面的路径不同。
+  # 后端保存的工作区元数据，不挂载给用户命令容器。
+  workspace-metadata-root: ${SANDBOX_WORKSPACE_METADATA_ROOT:/var/lib/qgents/workspace-metadata}
+  images:
+    dev-tools: ${SANDBOX_DEV_TOOLS_IMAGE:qgents/sandbox-dev-tools:0.2.0}
+  # 单个沙箱资源上限：内存按字节计（默认 4 GiB），十亿 nano-cpus 表示一个 CPU 核。
+  memory-bytes: ${SANDBOX_MEMORY_BYTES:4294967296}
+  nano-cpus: ${SANDBOX_NANO_CPUS:2000000000}
+  # 容器允许的任务数上限，包含进程和线程。
+  pids-limit: ${SANDBOX_PIDS_LIMIT:256}
+  # Maven/Gradle/npm 首次运行需要从远端解析依赖；可通过 SANDBOX_NETWORK_POLICY=none 显式禁网。
+  network-policy: ${SANDBOX_NETWORK_POLICY:outbound}
+  # stdout 和 stderr 各自允许保留的最大字节数
+  max-output-bytes: ${SANDBOX_MAX_OUTPUT_BYTES:1048576}
+  # 单个 Sandbox 的 Maven / Maven Wrapper 临时缓存容量上限（容器内可写 tmpfs，Sandbox 销毁后清理）
+  maven-cache-size: ${SANDBOX_MAVEN_CACHE_SIZE:2g}
+  # 单个 Sandbox 的 Gradle 临时缓存容量上限（容器内可写 tmpfs，Sandbox 销毁后清理）
+  gradle-cache-size: ${SANDBOX_GRADLE_CACHE_SIZE:3g}
+  # 单个 Sandbox 的 npm 临时缓存容量上限（容器内可写 tmpfs，Sandbox 销毁后清理）
+  npm-cache-size: ${SANDBOX_NPM_CACHE_SIZE:1g}
+  # 开发用户 HOME 的临时 tmpfs 容量；随沙箱销毁，Workspace 中的文件仍持久保留。
+  developer-home-size: ${SANDBOX_DEVELOPER_HOME_SIZE:8g}

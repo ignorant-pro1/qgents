@@ -1,0 +1,82 @@
+# Maven 构建产物与本地依赖缓存。
+target/
+.m2/
+.m2-local/
+.m2-temp/
+/data/
+
+# Java 编译产物
+*.class
+
+# 应用日志与日志目录
+*.log
+logs/
+
+# BlueJ 编辑器生成的上下文文件
+*.ctxt
+
+# J2ME 工具生成的临时目录
+.mtj.tmp/
+
+# 打包产物与压缩文件
+*.jar
+*.war
+*.nar
+*.ear
+*.zip
+*.tar.gz
+*.rar
+
+# JVM 崩溃与重放日志
+hs_err_pid*
+replay_pid*
+
+# IntelliJ IDEA 本机项目配置
+.idea/
+*.iml
+
+# VS Code 本机项目配置
+.vscode/
+
+# 操作系统和 Python 工具生成的本地文件。
+.DS_Store
+Thumbs.db
+Desktop.ini
+__pycache__/
+*.py[cod]
+
+# 其他开发助手的本地状态
+.omc/
+.claude/
+
+# 环境变量文件（本地运行配置，一律不入库）
+.env
+.env.*
+
+# 默认忽略 PEM 文件，允许提交的公钥在下方单独放行。
+*.pem
+
+# 例外必须放在 *.pem 之后：git 以最后一条匹配规则为准
+# 主后端 RSA 公钥公开无风险，允许提交
+!src/main/resources/rsa/public_key.pem
+# 环境变量配置示例允许提交
+!.env.example
+
+# 沙箱/工具临时目录
+.codex-test-tmp/
+
+# 本机密钥目录
+/secrets/
+
+# pi 实施流程的运行时状态与本地草稿，仅本机。
+.pi/
+
+# Windows 下误建的空文件，别进版本库。
+nul
+
+# 内部文档只在本地保留，不公开。
+docs/
+
+# 内部规范与领域词只在本地保留，不公开。
+AGENTS.md
+GLOSSARY.md

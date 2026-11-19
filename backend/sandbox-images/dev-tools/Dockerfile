@@ -1,0 +1,73 @@
+# Agent 用户命令运行镜像，构建上下文为本目录；与根目录的后端应用镜像分别构建。
+FROM eclipse-temurin:21-jdk-noble
+
+# 构建参数可通过 docker build 的 --build-arg 选项覆盖；它们不是后端运行时环境变量。
+ARG NODE_MAJOR=22
+# UID/GID 必须与后端 DockerContainerRuntime 中的挂载权限设置一致。
+ARG USER_ID=10001
+ARG GROUP_ID=10001
+# 固定 Android 命令行工具的官方归档版本与校验和，保证镜像构建可复现。
+ARG ANDROID_COMMAND_LINE_TOOLS_VERSION=15859902
+ARG ANDROID_COMMAND_LINE_TOOLS_SHA256=4e4c464f145a7512b57d088ac6c278c03c9eea610886b35a5e0804e74eedf583
+ARG ANDROID_API_LEVEL=35
+ARG ANDROID_BUILD_TOOLS_VERSION=35.0.0
+
+# 镜像内的工具版本与缓存位置；后端运行沙箱时将 HOME 和构建缓存挂为临时 tmpfs。
+ENV DEBIAN_FRONTEND=noninteractive \
+    MAVEN_VERSION=3.9.11 \
+    GRADLE_VERSION=8.10.2 \
+    HOME=/home/developer \
+    MAVEN_USER_HOME=/home/developer/.m2 \
+    GRADLE_USER_HOME=/home/developer/.gradle \
+    NPM_CONFIG_CACHE=/home/developer/.npm \
+    PNPM_HOME=/opt/pnpm \
+    ANDROID_HOME=/opt/android-sdk \
+    ANDROID_USER_HOME=/home/developer/.android \
+    JAVA_TOOL_OPTIONS="-Djava.io.tmpdir=/home/developer/.cache -Djansi.tmpdir=/home/developer/.cache" \
+    PATH=/opt/pnpm:/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:$PATH
+
+# 安装通用构建与检索工具，创建非 root 开发用户；源码由运行时挂载到 /workspace。
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        bash build-essential ca-certificates curl diffutils findutils gnupg git jq make \
+        patch python3 ripgrep tar unzip wget xz-utils zip \
+    && curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && curl -fsSL "https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz" \
+        | tar -xz -C /opt \
+    && ln -s "/opt/apache-maven-${MAVEN_VERSION}/bin/mvn" /usr/local/bin/mvn \
+    && curl -fsSL "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" -o /tmp/gradle.zip \
+    && unzip -q /tmp/gradle.zip -d /opt \
+    && ln -s "/opt/gradle-${GRADLE_VERSION}" /opt/gradle \
+    && ln -s /opt/gradle/bin/gradle /usr/local/bin/gradle \
+    && rm -f /tmp/gradle.zip \
+    && corepack enable \
+    && groupadd --gid ${GROUP_ID} developer \
+    && useradd --uid ${USER_ID} --gid ${GROUP_ID} --create-home --shell /bin/bash developer \
+    && mkdir -p /workspace /tmp/qgents /opt/pnpm /home/developer/.m2 /home/developer/.gradle /home/developer/.npm /home/developer/.cache \
+    && chown -R developer:developer /workspace /tmp/qgents /opt/pnpm /home/developer \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# 只安装无界面 Android 编译/本地单测所需 SDK；不引入 Android Studio、NDK 或 Emulator。
+# SDK 初始内容位于镜像层，用户级 Android 状态仍写入每个 Sandbox 的 HOME tmpfs。
+# Gradle 会按项目 compileSdk 自动补齐缺失组件，因此非 root 沙箱用户必须能写入 SDK 目录。
+RUN mkdir -p "${ANDROID_HOME}/cmdline-tools" "${ANDROID_USER_HOME}" \
+    && curl -fsSL "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_COMMAND_LINE_TOOLS_VERSION}_latest.zip" -o /tmp/android-command-line-tools.zip \
+    && echo "${ANDROID_COMMAND_LINE_TOOLS_SHA256}  /tmp/android-command-line-tools.zip" | sha256sum -c - \
+    && unzip -q /tmp/android-command-line-tools.zip -d /tmp/android-command-line-tools \
+    && mv /tmp/android-command-line-tools/cmdline-tools "${ANDROID_HOME}/cmdline-tools/latest" \
+    && yes | sdkmanager --sdk_root="${ANDROID_HOME}" --licenses >/dev/null \
+    && sdkmanager --sdk_root="${ANDROID_HOME}" \
+        "platform-tools" \
+        "platforms;android-${ANDROID_API_LEVEL}" \
+        "build-tools;${ANDROID_BUILD_TOOLS_VERSION}" \
+    && chown -R developer:developer "${ANDROID_HOME}" "${ANDROID_USER_HOME}" \
+    && rm -rf /tmp/android-command-line-tools /tmp/android-command-line-tools.zip
+
+# 后续用户命令以 developer 身份执行，默认从完整 Workspace 根目录开始。
+USER developer:developer
+WORKDIR /workspace
+
+# 保持容器可用，实际命令由后端通过 Docker exec 发起。
+CMD ["sleep", "infinity"]
