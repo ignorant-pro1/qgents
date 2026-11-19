@@ -3,6 +3,7 @@ import { getApiBaseUrl, getStoredToken, refreshAccessToken } from '@/api/client'
 import { projectEventsEnabled } from '@/api/projectEvents'
 import { queryClient } from '@/query'
 import { invalidateProjectTaskEvent } from './queryInvalidation'
+import { invalidateChatSummary } from './chatSyncQueue'
 import { PROJECT_TASK_EVENT_TYPES, type ProjectTaskEventType } from './eventParser'
 import type { RealtimeFrame } from '@/types'
 
@@ -97,7 +98,7 @@ export function dispatchRealtimeFrame(frame: RealtimeFrame): void {
   const projectId = typeof frame.projectId === 'string' && frame.projectId ? frame.projectId : null
   if (!projectId) return
   if (type === 'message.created') {
-    void queryClient.invalidateQueries({ queryKey: ['chat', 'main-groups'] })
+    invalidateChatSummary(queryClient, ['chat', 'main-groups'])
   }
   if (isProjectTaskEventType(type)) {
     invalidateProjectTaskEvent(projectId, { id: null, type, payload: { ...frame.payload, projectId } })
@@ -136,7 +137,7 @@ export class RealtimeClient {
   private handleReconnected(): void {
     void queryClient.invalidateQueries({ queryKey: ['notifications'] })
     void queryClient.invalidateQueries({ queryKey: ['teams', 'mine'] })
-    void queryClient.invalidateQueries({ queryKey: ['chat', 'main-groups'] })
+    invalidateChatSummary(queryClient, ['chat', 'main-groups'])
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('qgents:realtime-reconnected'))
     }

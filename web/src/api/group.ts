@@ -1,33 +1,68 @@
-import { request, requestPage } from './client'
+import { authApi } from './auth'
+import { ApiError, request, requestPage } from './client'
 import type {
   Group,
   GroupMember,
   MarkReadResult,
   Message,
+  MessageContextPage,
+  MessageContextDirection,
   SendMessageResult,
   SendMessagePayload,
   CreateGroupPayload,
   TaskTriggerRequest,
 } from '@/types'
 
-/** 群聊 API —— 对齐接口文档 v1.1.8 §7 */
+type GroupResponse = Omit<Group, 'type' | 'status'> & Partial<Pick<Group, 'type' | 'status'>> & {
+  defaultGroup?: boolean
+}
+
+function normalizeGroup(group: GroupResponse): Group {
+  return {
+    ...group,
+    type: group.type ?? (group.defaultGroup ? 'PROJECT_MAIN' : 'REQUIREMENT'),
+    status: group.status ?? (group.isArchived ? 'ARCHIVED' : 'ACTIVE'),
+  }
+}
+
+async function listProjectGroups(projectId: string): Promise<Group[]> {
+  const groups = await request<GroupResponse[]>(`/projects/${projectId}/groups`)
+  return groups.map(normalizeGroup)
+}
 export const groupApi = {
-  listByProject(projectId: string) {
-    return request<Group[]>(`/projects/${projectId}/groups`)
-  },
-  /** 主群聚合（§五）：一次返回当前用户全部可见项目主群，替代 teams→projects→groups 三层串联查询 */
-  listMainGroups() {
-    return request<Group[]>('/chat/main-groups')
+  listByProject: listProjectGroups,
+  async listMainGroups(): Promise<Group[]> {
+    try {
+      const groups = await request<GroupResponse[]>('/chat/main-groups')
+      return groups.map(normalizeGroup)
+    } catch (error) {
+      if (!(error instanceof ApiError) || error.status !== 404) throw error
+    }
+
+    // 团队后端尚未部署聚合接口，按 /me 返回的可访问项目分批查询。
+    const { projects } = await authApi.me()
+    const mainGroups: Group[] = []
+    const batchSize = 6
+    for (let offset = 0; offset < projects.length; offset += batchSize) {
+      const groups = await Promise.all(
+        projects.slice(offset, offset + batchSize).map(({ id }) => listProjectGroups(id)),
+      )
+      mainGroups.push(...groups.flat().filter(({ type }) => type === 'PROJECT_MAIN'))
+    }
+    return mainGroups
   },
   /** 标记群已读（§三 进群全读）：后端推进已读游标到群最新消息；写操作由 client 自动带 Idempotency-Key */
   markRead(projectId: string, groupId: string) {
     return request<MarkReadResult>(`/projects/${projectId}/groups/${groupId}/read`, { method: 'POST' })
   },
   create(projectId: string, payload: CreateGroupPayload) {
-    return request<Group>(`/projects/${projectId}/groups`, { method: 'POST', body: payload })
+    return request<GroupResponse>(`/projects/${projectId}/groups`, {
+      method: 'POST',
+      body: { ...payload, userIds: payload.memberIds },
+    }).then(normalizeGroup)
   },
   getById(projectId: string, groupId: string) {
-    return request<Group>(`/projects/${projectId}/groups/${groupId}`)
+    return request<GroupResponse>(`/projects/${projectId}/groups/${groupId}`).then(normalizeGroup)
   },
   listMembers(projectId: string, groupId: string) {
     return request<GroupMember[]>(`/projects/${projectId}/groups/${groupId}/members`)
@@ -83,8 +118,36 @@ export const groupApi = {
     )
   },
   /** 单条消息定位（通知「@ 提及」跳转用，§群聊@提及补充）：目标消息不在已加载分页时拉取 */
-  getMessage(projectId: string, groupId: string, messageId: string) {
-    return request<Message>(`/projects/${projectId}/groups/${groupId}/messages/${messageId}`)
+  getMessage(projectId: string, groupId: string, messageId: string, signal?: AbortSignal) {
+    return request<Message>(`/projects/${projectId}/groups/${groupId}/messages/${messageId}`, { signal })
+  },
+  /** Proposed endpoint: keep separate from the existing history/incremental cursors. */
+  async getMessageContext(projectId: string, groupId: string, messageId: string, options: {
+    direction?: MessageContextDirection
+    cursor?: string
+    limit?: number
+    signal?: AbortSignal
+  } = {}): Promise<MessageContextPage> {
+    const direction = options.direction ?? 'around'
+    const params = new URLSearchParams({ direction, limit: String(options.limit ?? 30) })
+    if (options.cursor) params.set('cursor', options.cursor)
+    const result = await request<MessageContextPage>(
+      `/projects/${projectId}/groups/${groupId}/messages/${messageId}/context?${params}`, { signal: options.signal },
+    )
+    const info = result?.page
+    if (result?.anchorMessageId !== messageId || !Array.isArray(result.messages) || !info ||
+      result.messages.some((row) => !row || typeof row.id !== 'string' || row.groupId !== groupId) ||
+      typeof info.hasMoreBefore !== 'boolean' || typeof info.hasMoreAfter !== 'boolean' ||
+      (info.beforeCursor !== null && typeof info.beforeCursor !== 'string') ||
+      (info.afterCursor !== null && typeof info.afterCursor !== 'string') ||
+      (info.hasMoreBefore && !info.beforeCursor) || (info.hasMoreAfter && !info.afterCursor) ||
+      (!options.cursor && !result.messages.some((row) => row.id === messageId)) ||
+      (result.messages.length === 0 && (info.hasMoreBefore || info.hasMoreAfter)) ||
+      (options.cursor && direction === 'before' && info.hasMoreBefore && info.beforeCursor === options.cursor) ||
+      (options.cursor && direction === 'after' && info.hasMoreAfter && info.afterCursor === options.cursor)) {
+      throw new Error('消息上下文响应或游标无效')
+    }
+    return result
   },
   /** PUT /projects/{projectId}/groups/{groupId}/pin — 置顶/取消置顶（当前用户维度，§群聊置顶后端接口需求） */
   setGroupPinned(projectId: string, groupId: string, pinned: boolean) {

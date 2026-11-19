@@ -218,6 +218,20 @@ export interface Message {
   pending?: boolean
 }
 
+/** CHAT-003B proposed context contract; see docs/chat-003b-backend-contract.md. */
+export interface MessageContextPage {
+  anchorMessageId: string
+  messages: Message[]
+  page: {
+    beforeCursor: string | null
+    afterCursor: string | null
+    hasMoreBefore: boolean
+    hasMoreAfter: boolean
+  }
+}
+
+export type MessageContextDirection = 'around' | 'before' | 'after'
+
 export interface SendMessagePayload {
   type: MessageContentType
   content: unknown

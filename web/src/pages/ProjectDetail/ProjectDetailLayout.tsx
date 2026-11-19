@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState, type MouseEvent as ReactMouseEvent } from 'react'
+import { useEffect, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Badge, Form, Input, Modal, Select } from 'antd'
@@ -10,13 +10,12 @@ import { latestMessageText } from '@/utils/messageSummary'
 import { useProjectTaskDomainEvents } from '@/realtime/useProjectTaskDomainEvents'
 import { useRealtimeConnectionStatus } from '@/realtime/realtimeClient'
 import type { CreateGroupPayload, Group } from '@/types'
+import type { RequirementChatOutletContext } from './RequirementChatPage'
 import './ProjectDetailLayout.scss'
-
-// 群聊仅在项目总群页面可见；将其移出其他项目子页的首屏模块图。
-const ChatPanel = lazy(async () => ({ default: (await import('@/components/chat/ChatPanel')).ChatPanel }))
 
 /** 群聊置顶（本地偏好）localStorage 键，按项目隔离，避免不同项目互相污染。 */
 const PINNED_GROUPS_KEY = 'qgents_pinned_groups'
+const EMPTY_GROUPS: readonly Group[] = []
 
 function pinnedGroupsKey(projectId: string): string {
   return `${PINNED_GROUPS_KEY}:${projectId}`
@@ -99,14 +98,23 @@ export default function ProjectDetailLayout() {
   const projectName = project?.name ?? projectId
 
   // 群列表（项目总群 + 需求群）
-  const { data: groups = [], isLoading: groupsLoading } = useQuery({
+  const groupsQuery = useQuery({
     queryKey: ['groups', projectId],
     queryFn: () => groupApi.listByProject(projectId),
     enabled: !!projectId,
   })
-  const mainGroup = groups.find((g) => g.type === 'PROJECT_MAIN') ?? groups[0]
-  // 默认进入项目总群时直接复用当前布局渲染，避免先进入空 req-chat 再 Navigate 一次。
-  const effectiveGroupId = onReqChat ? groupId ?? mainGroup?.id : groupId
+  const groups = groupsQuery.data ?? EMPTY_GROUPS
+  const mainGroup = groups.find((g) => g.type === 'PROJECT_MAIN')
+  const defaultGroupId = (mainGroup ?? groups[0])?.id
+  const effectiveGroupId = groupId ?? defaultGroupId
+  const chatContext: RequirementChatOutletContext = {
+    defaultGroupId,
+    groupsPending: groupsQuery.isPending,
+    groupsPaused: groupsQuery.fetchStatus === 'paused',
+    groupsFailed: groupsQuery.isError && groups.length === 0,
+    retryGroups: () => { void groupsQuery.refetch() },
+    openCreateGroup: () => setCreateOpen(true),
+  }
 
   // 建群选成员的候选池 = 项目成员；项目成员接口可能不返回 displayName，用团队成员接口补全（项目成员 ⊆ 团队成员）
   const { data: projectMembers = [] } = useQuery({
@@ -223,10 +231,8 @@ export default function ProjectDetailLayout() {
               {pinned && <PushpinOutlined className="pd-nav__branch-pin" />}
               <span className="pd-nav__branch-title">{g.title}</span>
               {isMain && <span className="pd-nav__branch-main-tag">总群</span>}
-              {/* 未读 @ 角标：该群有 @ 我的未读消息（后端 mentionedUnread > 0 时显示）。
-                  正在查看的群不显示（人在群里，无需侧栏红字提示；离开时 markRead 会清掉） */}
-              {(!onReqChat || effectiveGroupId !== g.id) &&
-              typeof g.mentionedUnread === 'number' &&
+              {/* 当前选中不代表已读成功；角标随服务端摘要更新。 */}
+              {typeof g.mentionedUnread === 'number' &&
               g.mentionedUnread > 0 ? (
                 <span
                   style={{
@@ -243,10 +249,7 @@ export default function ProjectDetailLayout() {
                   有人@你
                 </span>
               ) : null}
-              {/* 正在查看的群不显示未读红点（游标只在进群时推进，群内新消息红点由前端视觉隐藏） */}
-              {!onReqChat || effectiveGroupId !== g.id ? (
-                g.unreadCount ? <Badge count={g.unreadCount} overflowCount={99} size="small" /> : null
-              ) : null}
+              {g.unreadCount ? <Badge count={g.unreadCount} overflowCount={99} size="small" /> : null}
             </span>
             {g.latestMessage ? (
               <span className="pd-nav__branch-summary">
@@ -333,8 +336,10 @@ export default function ProjectDetailLayout() {
             size="small"
           />
           <ul className="pd-nav__branch-list">
-            {groupsLoading ? (
-              <li className="pd-nav__empty">正在加载群聊…</li>
+            {chatContext.groupsPending ? (
+              <li className="pd-nav__empty">{chatContext.groupsPaused ? '等待网络恢复…' : '正在加载群聊…'}</li>
+            ) : chatContext.groupsFailed ? (
+              <li className="pd-nav__empty">群聊加载失败</li>
             ) : (
               <>
                 {mainGroup && matches(mainGroup) && renderBranch(mainGroup)}
@@ -354,7 +359,7 @@ export default function ProjectDetailLayout() {
           <button
             type="button"
             className="pd-nav__new-branch-chat"
-            onClick={() => setCreateOpen(true)}
+            onClick={chatContext.openCreateGroup}
           >
             + 新建需求群
           </button>
@@ -371,11 +376,7 @@ export default function ProjectDetailLayout() {
       />
 
       <div className="pd-main">
-        {onReqChat && !groupId && mainGroup ? (
-          <Suspense fallback={<div aria-busy="true" aria-label="正在加载群聊" />}><ChatPanel key={mainGroup.id} projectId={projectId} groupId={mainGroup.id} /></Suspense>
-        ) : (
-          <Outlet />
-        )}
+        <Outlet context={chatContext} />
       </div>
 
       {/* 新建需求群弹窗 */}

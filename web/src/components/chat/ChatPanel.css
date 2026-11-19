@@ -1,6 +1,18 @@
 .chat-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--ant-color-border);
   flex-wrap: wrap;
   gap: 12px;
+}
+
+.chat-panel__header-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
 }
 
 .chat-panel__header-actions {
@@ -8,27 +20,100 @@
 }
 
 .chat-panel__message-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 20px;
+  min-width: 0;
+}
+.chat-panel__message-list:focus-visible { outline: 2px solid var(--ant-color-primary); outline-offset: -2px; }
+
+/* 消息视口外层：承载浮动的「新消息」入口，让提示脱离滚动内容流。 */
+.chat-panel__viewport {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
   min-width: 0;
 }
 
-.chat-panel__message-row {
+/* 提示在失败、重试和恢复之间占用相同空间，避免挤压消息视口。 */
+.chat-panel__read-status {
+  flex: 0 0 112px;
+  height: 112px;
+  box-sizing: border-box;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: auto 1fr 32px;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 20px;
   min-width: 0;
 }
+
+.chat-panel__read-status > .ant-typography {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+}
+.chat-panel__connection { grid-column: 1 / -1; }
+.chat-panel__read-ack { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 12px; }
+.chat-panel__read-ack > .ant-typography { flex: 1; min-width: 0; }
+.chat-panel__read-ack > .ant-btn { flex-shrink: 0; }
+
+.chat-panel__read-status > .ant-btn,
+.chat-panel__history-status > .ant-btn {
+  flex-shrink: 0;
+}
+
+.chat-panel__history-status {
+  flex: 0 0 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.chat-panel__message-content {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.chat-panel__message-state {
+  display: grid;
+  height: 100%;
+  place-content: center;
+  justify-items: center;
+}
+
+.chat-panel__message-state-label { margin-top: 16px; color: #5b6b82; font-size: 14px; }
+.chat-panel__history-indicator { padding: 8px 0; text-align: center; }
+
+.chat-panel__message-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.chat-panel__message-body { min-width: 0; max-width: 78%; }
 
 .chat-panel__message-row--grouped {
   margin-top: -6px;
 }
 
 .chat-panel__mention-jump {
-  position: sticky;
-  bottom: 12px;
+  position: relative;
   align-self: center;
   z-index: 2;
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  max-width: min(92%, 320px);
-  margin-top: 10px;
+  max-width: 100%;
+  min-height: 36px;
+  margin: 0;
   padding: 7px 16px;
   border: 1px solid rgba(245, 158, 11, 0.4);
   border-radius: 999px;
@@ -44,7 +129,108 @@
 .chat-panel__mention-jump:focus-visible {
   background: #fff7d6;
   box-shadow: 0 6px 18px rgba(120, 53, 15, 0.18);
-  outline: none;
+  outline: 2px solid var(--ant-color-primary);
+  outline-offset: 2px;
+}
+
+.chat-panel__reading-actions {
+  position: absolute;
+  bottom: 12px;
+  left: 12px;
+  right: 12px;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+}
+.chat-panel__reading-actions > * { pointer-events: auto; }
+
+/* CHAT-005：阅读历史时的普通新消息入口。
+   实心主色胶囊 + 下箭头，和琥珀色的「有人@你」在视觉层级上分开：
+   @ 是「有人找你」，这里只是「下面有新内容」。 */
+.chat-panel__new-messages {
+  position: relative;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  max-width: 100%;
+  padding: 0 15px 0 7px;
+  border: 0;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.18),
+    0 6px 18px rgba(15, 23, 42, 0.22);
+  transition: filter 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+  animation: chat-panel-new-messages-in 200ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.chat-panel__new-messages:hover {
+  filter: brightness(1.06);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.24),
+    0 8px 22px rgba(15, 23, 42, 0.28);
+}
+
+.chat-panel__new-messages:active {
+  transform: scale(0.97);
+}
+
+.chat-panel__new-messages:focus-visible {
+  outline: 2px solid var(--ant-color-primary-border, var(--ant-color-primary));
+  outline-offset: 2px;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.24),
+    0 8px 22px rgba(15, 23, 42, 0.28);
+}
+
+/* 箭头托底圆：让「跳到底部」这个动作在文字之前先被读到 */
+.chat-panel__new-messages-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.24);
+  font-size: 11px;
+}
+
+.chat-panel__new-messages-label {
+  display: inline-flex;
+  align-items: baseline;
+  white-space: nowrap;
+}
+
+.chat-panel__new-messages-count {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+/* 从下方轻落，避免在阅读历史时生硬弹出 */
+@keyframes chat-panel-new-messages-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-panel__new-messages {
+    animation: none;
+    transition: none;
+  }
 }
 
 .chat-panel__composer-row {
@@ -54,6 +240,62 @@
   width: 100%;
   min-width: 0;
 }
+
+.chat-panel__context-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 20px;
+  border-bottom: 1px solid var(--ant-color-border);
+}
+
+.chat-panel__context-notice {
+  padding: 8px 20px;
+  color: var(--ant-color-text-secondary);
+  background: var(--ant-color-fill-quaternary);
+}
+
+.chat-panel__context-content {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.chat-panel__context-sync {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 32px;
+  padding-inline: 20px;
+}
+
+.chat-panel__composer {
+  position: relative;
+  padding: 12px 20px 16px;
+  border-top: 1px solid var(--ant-color-border);
+}
+
+.chat-panel__reply-preview {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--ant-color-border);
+  border-radius: 8px;
+  background: var(--ant-color-fill-quaternary);
+}
+
+.chat-panel__reply-preview-content { flex: 1; min-width: 0; }
+.chat-panel__task-status-card { padding: 10px 12px; border: 1px solid rgba(13, 155, 138, .35); border-radius: 8px; background: rgba(13, 155, 138, .06); }
+.chat-panel__task-status-header, .chat-panel__task-status-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.chat-panel__task-status-repositories, .chat-panel__task-status-steps { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+.chat-panel__task-status-step { display: flex; align-items: flex-start; gap: 8px; padding: 3px 0; }
+.chat-panel__task-status-step > span { width: 8px; height: 8px; margin-top: 6px; border-radius: 50%; flex-shrink: 0; }
+.chat-panel__task-status-footer { margin-top: 8px; padding-top: 8px; border-top: 1px dashed rgba(13,155,138,.3); }
 
 .chat-panel__composer-tool,
 .chat-panel__composer-send {
@@ -66,6 +308,9 @@
 }
 
 @media (max-width: 640px) {
+  .chat-panel__read-status { padding-inline: 12px; gap: 4px 8px; }
+  .chat-panel__context-toolbar, .chat-panel__context-notice, .chat-panel__context-sync { padding-inline: 12px; }
+  .chat-panel__message-body { max-width: 86%; overflow-wrap: anywhere; }
   .chat-panel__header {
     padding: 10px 12px !important;
   }
@@ -95,3 +340,5 @@
     padding-inline: 12px;
   }
 }
+.chat-panel { min-width: 0; min-height: 0; overflow: hidden; }
+.chat-panel__heading { min-width: 0; overflow-wrap: anywhere; }

@@ -72,6 +72,38 @@ describe('groupApi.markRead', () => {
   })
 })
 
+describe('groupApi.getMessageContext (proposed CHAT-003B contract)', () => {
+  const response = {
+    anchorMessageId: 'anchor',
+    messages: [{ id: 'anchor', groupId: 'group-1', sequence: 30, type: 'TEXT', senderType: 'USER', content: { text: 'target' }, createdAt: '2026-10-19T00:00:00Z' }],
+    page: { beforeCursor: 'opaque-before', afterCursor: 'opaque-after', hasMoreBefore: true, hasMoreAfter: true },
+  }
+  function serve(value: unknown) {
+    return vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ data: value }), { headers: { 'Content-Type': 'application/json' } }))
+  }
+  it('uses the normal API client and forwards opaque directional cursors without decoding them', async () => {
+    const fetchMock = serve(response)
+    const cursor = 'opaque +/=游标'
+    await expect(groupApi.getMessageContext('project-1', 'group-1', 'anchor', { direction: 'before', cursor, limit: 30 })).resolves.toEqual(response)
+    const url = new URL(String(fetchMock.mock.calls[0][0]), 'http://localhost')
+    expect(url.pathname).toBe('/api/projects/project-1/groups/group-1/messages/anchor/context')
+    expect(url.searchParams.get('direction')).toBe('before')
+    expect(url.searchParams.get('cursor')).toBe(cursor)
+  })
+  it('rejects a response from another group instead of displaying it', async () => {
+    serve({ ...response, messages: [{ ...response.messages[0], groupId: 'other-group' }] })
+    await expect(groupApi.getMessageContext('project-1', 'group-1', 'anchor')).rejects.toThrow('消息上下文响应或游标无效')
+  })
+  it('rejects a non-advancing directional cursor', async () => {
+    serve(response)
+    await expect(groupApi.getMessageContext('project-1', 'group-1', 'anchor', { direction: 'before', cursor: 'opaque-before' })).rejects.toThrow('消息上下文响应或游标无效')
+  })
+  it('requires the target in an initial window and consistent hasMore/cursor metadata', async () => {
+    serve({ ...response, messages: [], page: { ...response.page, beforeCursor: null } })
+    await expect(groupApi.getMessageContext('project-1', 'group-1', 'anchor')).rejects.toThrow('消息上下文响应或游标无效')
+  })
+})
+
 describe('groupApi.listMainGroups', () => {
   it('lists all visible project main groups through the aggregation endpoint', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
@@ -85,6 +117,30 @@ describe('groupApi.listMainGroups', () => {
     expect(groups).toHaveLength(2)
     expect(groups[0]).toMatchObject({ projectId: 'project-1', unreadCount: 2 })
     expect(fetchMock).toHaveBeenCalledWith('/api/chat/main-groups', expect.any(Object))
+  })
+
+  it('uses visible project groups when the team server has no aggregation endpoint', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(Response.json({ code: 'NOT_FOUND' }, { status: 404 }))
+      .mockResolvedValueOnce(Response.json({ data: { projects: [{ id: 'project-1' }] } }))
+      .mockResolvedValueOnce(Response.json({ data: [
+        { id: 'main', projectId: 'project-1', defaultGroup: true, unreadCount: 4 },
+        { id: 'requirements', projectId: 'project-1', defaultGroup: false },
+      ] }))
+
+    await expect(groupApi.listMainGroups()).resolves.toEqual([
+      expect.objectContaining({ id: 'main', type: 'PROJECT_MAIN', status: 'ACTIVE', unreadCount: 4 }),
+    ])
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/me', expect.any(Object))
+    expect(fetchMock).toHaveBeenNthCalledWith(3, '/api/projects/project-1/groups', expect.any(Object))
+  })
+
+  it('preserves real errors from the aggregation endpoint', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(Response.json({ code: 'INTERNAL_ERROR' }, { status: 500 }))
+
+    await expect(groupApi.listMainGroups()).rejects.toMatchObject({ status: 500 })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 })
 

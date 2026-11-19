@@ -29,7 +29,7 @@ describe('dispatchRealtimeFrame', () => {
     expect(spy).toHaveBeenCalledWith({ queryKey: ['notifications'] })
   })
 
-  it('invalidates group list, messages and main-group aggregation for project message.created', () => {
+  it('invalidates group list, messages and main-group aggregation for project message.created', async () => {
     const spy = vi.spyOn(queryClient, 'invalidateQueries').mockResolvedValue(undefined)
     const frame: RealtimeFrame = {
       type: 'message.created',
@@ -40,9 +40,10 @@ describe('dispatchRealtimeFrame', () => {
       payload: { projectId: 'project-1', groupId: 'group-1', messageId: 'message-1' },
     }
     dispatchRealtimeFrame(frame)
-    expect(spy).toHaveBeenCalledWith({ queryKey: ['groups', 'project-1'] })
-    expect(spy).toHaveBeenCalledWith({ queryKey: ['groups', 'project-1', 'group-1', 'messages'] })
-    expect(spy).toHaveBeenCalledWith({ queryKey: ['chat', 'main-groups'] })
+    await Promise.resolve()
+    expect(spy).toHaveBeenCalledWith({ queryKey: ['groups', 'project-1'], exact: true }, { cancelRefetch: false })
+    expect(spy).toHaveBeenCalledWith({ queryKey: ['groups', 'project-1', 'group-1', 'messages'], exact: false }, { cancelRefetch: false })
+    expect(spy).toHaveBeenCalledWith({ queryKey: ['chat', 'main-groups'], exact: true }, { cancelRefetch: false })
   })
 
   it('invalidates task queries for project task.updated', () => {

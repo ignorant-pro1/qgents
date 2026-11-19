@@ -7,6 +7,7 @@ import { MOCK_CURRENT_USER } from './currentUser'
 import { deliveryCenterHandlers } from './delivery-center/handlers'
 import { createTaskFromMessageIntent, findTaskByTriggerMessageId } from './task-model/handlers'
 import { createWorkBranchHandlers } from './workBranches'
+import { createMessageContextHandler } from './messageContext'
 
 /**
  * 自动建任务从消息中提取可读正文。QUOTE 的 content 是结构化引用元数据，不能
@@ -1735,6 +1736,9 @@ export const handlers = [
       page: { nextCursor: null, hasMore: false },
     })
   }),
+
+  createMessageContextHandler((projectId, groupId) =>
+    (MOCK_GROUPS[projectId] ?? []).some((group) => group.id === groupId) ? MOCK_MESSAGES[groupId] ?? [] : undefined),
 
   // 单条消息定位（通知「@ 提及」跳转用）：目标消息不在已加载分页时拉取
   http.get('/api/projects/:projectId/groups/:groupId/messages/:messageId', ({ params }) => {

@@ -64,6 +64,8 @@ export type {
   GroupMember,
   MarkReadResult,
   Message,
+  MessageContextPage,
+  MessageContextDirection,
   MessageSummary,
   MessageContentType,
   MessageSenderType,

@@ -1,6 +1,7 @@
 import type { QueryKey } from '@tanstack/react-query'
 import { deliveryCenterKeys, queryClient, queryKeys, taskModelQueryKeys } from '@/query'
 import type { ProjectTaskEvent, ProjectTaskEventPayload } from './eventParser'
+import { invalidateChatMessages, invalidateChatSummary } from './chatSyncQueue'
 
 export const TASK_MODEL_QUERY_ROOTS = (projectId: string): readonly QueryKey[] => [
   taskModelQueryKeys.tasks.all(projectId),
@@ -249,18 +250,31 @@ export function queryKeysForProjectTaskEvent(
 }
 
 export function invalidateProjectTaskEvent(projectId: string, event: ProjectTaskEvent): void {
+  if (event.payload.projectId !== projectId) return
+  let handledByChat = false
+  const messageEvent = event.type === 'message.created' || event.type === 'message.updated'
+  const groupId = typeof event.payload.groupId === 'string'
+    ? event.payload.groupId
+    : typeof event.payload.requirementGroupId === 'string' ? event.payload.requirementGroupId : null
   if (event.type === 'message.created' || event.type === 'message.updated' || event.type === 'task.updated') {
-    const groupId = typeof event.payload.groupId === 'string'
-      ? event.payload.groupId
-      : typeof event.payload.requirementGroupId === 'string' ? event.payload.requirementGroupId : null
     const sequence = typeof event.payload.sequence === 'number' ? event.payload.sequence : null
-    if (groupId && typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('qgents:message-event', {
+    if (groupId && (!messageEvent || stringId(event.payload, 'messageId')) && typeof window !== 'undefined') {
+      handledByChat = !window.dispatchEvent(new CustomEvent('qgents:message-event', {
+        cancelable: true,
         detail: { projectId, groupId, sequence, eventType: event.type },
       }))
     }
   }
   for (const queryKey of queryKeysForProjectTaskEvent(projectId, event)) {
+    if (queryKey[0] === 'groups' && queryKey.length === 2) {
+      invalidateChatSummary(queryClient, ['groups', projectId])
+      continue
+    }
+    if (messageEvent && groupId && queryKey[3] === 'messages') {
+      if (handledByChat) void queryClient.invalidateQueries({ queryKey, refetchType: 'none' })
+      else invalidateChatMessages(queryClient, projectId, groupId)
+      continue
+    }
     void queryClient.invalidateQueries({ queryKey })
   }
 }
@@ -269,4 +283,19 @@ export function invalidateProjectTaskModel(projectId: string): void {
   for (const queryKey of TASK_MODEL_QUERY_ROOTS(projectId)) {
     void queryClient.invalidateQueries({ queryKey })
   }
+}
+
+/** 游标过期后由当前聊天窗口串行补偿；其他消息缓存留待再次打开时校准。 */
+export function invalidateProjectChatAfterCursorExpiry(projectId: string): void {
+  const handledByChat = typeof window !== 'undefined' && !window.dispatchEvent(new CustomEvent('qgents:chat-resync', {
+    cancelable: true,
+    detail: { projectId },
+  }))
+  void queryClient.invalidateQueries({
+    queryKey: ['groups', projectId],
+    predicate: (query) => query.queryKey[3] === 'messages',
+    refetchType: handledByChat ? 'none' : 'active',
+  }, { cancelRefetch: false })
+  invalidateChatSummary(queryClient, ['groups', projectId])
+  invalidateChatSummary(queryClient, ['chat', 'main-groups'])
 }

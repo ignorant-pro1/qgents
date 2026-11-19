@@ -1,39 +1,57 @@
-import { Spin } from 'antd'
-import { MessageOutlined } from '@ant-design/icons'
-import { useParams } from 'react-router-dom'
-import { ChatPanel } from '@/components/chat/ChatPanel'
+import { lazy, Suspense } from 'react'
+import { Button, Empty, Spin, Typography } from 'antd'
+import { useOutletContext, useParams } from 'react-router-dom'
 
-/**
- * 需求群聊页 —— 薄壳，聊天逻辑在 ChatPanel。
- * 路由：/app/projects/:projectId/req-chat/:groupId
- *
- * groupId 为空 = 刚进入项目、群列表尚未加载完成（ProjectDetailLayout 会在
- * groups 就绪后自动重定向到主群）。此时渲染加载占位而不是 ChatPanel，
- * 避免空 groupId 触发「还没有消息」空态闪烁（修复：从团队首页进入项目闪一下）。
- */
+const ChatPanel = lazy(async () => ({ default: (await import('@/components/chat/ChatPanel')).ChatPanel }))
+
+export interface RequirementChatOutletContext {
+  defaultGroupId: string | undefined
+  groupsPending: boolean
+  groupsPaused: boolean
+  groupsFailed: boolean
+  retryGroups: () => void
+  openCreateGroup: () => void
+}
+
+function ChatLoading() {
+  return (
+    <div className="pd-chat-state" role="status">
+      <Spin size="large" />
+      <Typography.Text type="secondary">正在进入项目群聊…</Typography.Text>
+    </div>
+  )
+}
+
+/** 项目群聊入口。子路由使用侧栏已有的群列表查询结果。 */
 export default function RequirementChatPage() {
-  const { projectId = '', groupId = '' } = useParams<{ projectId: string; groupId: string }>()
+  const { projectId = '', groupId } = useParams<{ projectId: string; groupId: string }>()
+  const { defaultGroupId, groupsPending, groupsPaused, groupsFailed, retryGroups, openCreateGroup } =
+    useOutletContext<RequirementChatOutletContext>()
+  const selectedGroupId = groupId ?? defaultGroupId
 
-  if (!groupId) {
+  if (selectedGroupId) {
     return (
-      <div
-        style={{
-          height: '100%',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-        }}
-      >
-        <div style={{ textAlign: 'center' }}>
-          <Spin size="large" />
-          <div style={{ marginTop: 16, color: '#5b6b82', fontSize: 14 }}>
-            <MessageOutlined style={{ marginRight: 8 }} />
-            正在进入项目群聊…
-          </div>
-        </div>
-      </div>
+      <Suspense fallback={<ChatLoading />}>
+        <ChatPanel key={`${projectId}/${selectedGroupId}`} projectId={projectId} groupId={selectedGroupId} />
+      </Suspense>
     )
   }
 
-  return <ChatPanel key={groupId} projectId={projectId} groupId={groupId} />
+  if (groupsPending && !groupsPaused) return <ChatLoading />
+
+  return (
+    <section className="pd-chat-state" aria-label="项目群聊状态">
+      {groupsPaused ? (
+        <Typography.Text type="secondary" role="status">等待网络恢复后加载群聊…</Typography.Text>
+      ) : groupsFailed ? (
+        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="群聊加载失败，请重试">
+          <Button onClick={retryGroups}>重试加载群聊</Button>
+        </Empty>
+      ) : (
+        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无可用群聊">
+          <Button type="primary" onClick={openCreateGroup}>新建需求群</Button>
+        </Empty>
+      )}
+    </section>
+  )
 }

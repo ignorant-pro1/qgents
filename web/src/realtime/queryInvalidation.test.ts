@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { queryClient } from '@/query'
-import { invalidateProjectTaskModel, queryKeysForProjectTaskEvent } from './queryInvalidation'
+import { invalidateProjectChatAfterCursorExpiry, invalidateProjectTaskEvent, invalidateProjectTaskModel, queryKeysForProjectTaskEvent } from './queryInvalidation'
 import type { ProjectTaskEvent } from './eventParser'
 
 const projectId = 'project-1'
@@ -192,5 +192,66 @@ describe('project SSE Task model query invalidation mapping', () => {
       JSON.stringify(['qgents', 'projects', projectId, 'merge-requests']),
       JSON.stringify(['qgents', 'projects', projectId, 'work-branches']),
     ])
+  })
+
+  it('coalesces unclaimed message invalidations and keeps summary invalidation exact', async () => {
+    const invalidate = vi.spyOn(queryClient, 'invalidateQueries').mockResolvedValue(undefined)
+    for (let index = 0; index < 8; index++) invalidateProjectTaskEvent(projectId, {
+      id: null, type: 'message.created', payload: { projectId, groupId: 'inactive', messageId: `m-${index}` },
+    })
+    await Promise.resolve()
+    expect(invalidate).toHaveBeenCalledTimes(2)
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['groups', projectId], exact: true }, { cancelRefetch: false })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['groups', projectId, 'inactive', 'messages'], exact: false }, { cancelRefetch: false })
+  })
+
+  it('invalidates only the expired project messages and both unread summaries', async () => {
+    const keys = [
+      ['groups', projectId], ['chat', 'main-groups'],
+      ['groups', projectId, 'g1', 'messages'],
+      ['groups', projectId, 'g1', 'messages', 'context', 'old'],
+      ['groups', projectId, 'g1', 'members'],
+      ['groups', 'another-project', 'g1', 'messages'],
+    ]
+    try {
+      keys.forEach((key) => queryClient.setQueryData(key, []))
+      invalidateProjectChatAfterCursorExpiry(projectId)
+      await Promise.resolve()
+      expect(keys.map((key) => queryClient.getQueryState(key)?.isInvalidated)).toEqual([true, true, true, true, false, false])
+    } finally { queryClient.clear() }
+  })
+
+  it('lets the active chat queue own recovery and retains refetch fallback without a chat', async () => {
+    const invalidate = vi.spyOn(queryClient, 'invalidateQueries').mockResolvedValue(undefined)
+    const claim = (event: Event) => event.preventDefault()
+    window.addEventListener('qgents:chat-resync', claim)
+    try {
+      invalidateProjectChatAfterCursorExpiry(projectId)
+      expect(invalidate).toHaveBeenCalledWith(expect.objectContaining({ queryKey: ['groups', projectId], refetchType: 'none' }), { cancelRefetch: false })
+    } finally { window.removeEventListener('qgents:chat-resync', claim) }
+    invalidateProjectChatAfterCursorExpiry(projectId)
+    await Promise.resolve()
+    expect(invalidate).toHaveBeenCalledWith(expect.objectContaining({ queryKey: ['groups', projectId], refetchType: 'active' }), { cancelRefetch: false })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['groups', projectId], exact: true }, { cancelRefetch: false })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['chat', 'main-groups'], exact: true }, { cancelRefetch: false })
+  })
+
+  it('lets only the active group claim synchronization and rejects mismatched project events', async () => {
+    const invalidate = vi.spyOn(queryClient, 'invalidateQueries').mockResolvedValue(undefined)
+    const onMessage = (event: Event) => {
+      const detail = (event as CustomEvent<{ projectId: string; groupId: string }>).detail
+      if (detail.projectId === projectId && detail.groupId === 'active') event.preventDefault()
+    }
+    window.addEventListener('qgents:message-event', onMessage)
+    try {
+      invalidateProjectTaskEvent(projectId, { id: null, type: 'message.updated', payload: { projectId: 'other-project', groupId: 'active', messageId: 'm-1' } })
+      expect(invalidate).not.toHaveBeenCalled()
+      for (const groupId of ['active', 'inactive']) invalidateProjectTaskEvent(projectId, {
+        id: null, type: 'message.updated', payload: { projectId, groupId, messageId: 'm-1' },
+      })
+      await Promise.resolve()
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: ['groups', projectId, 'active', 'messages'], refetchType: 'none' })
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: ['groups', projectId, 'inactive', 'messages'], exact: false }, { cancelRefetch: false })
+    } finally { window.removeEventListener('qgents:message-event', onMessage) }
   })
 })

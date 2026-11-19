@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Layout, Input, List, Avatar, Typography, Space, theme, Empty, Badge, Spin } from 'antd'
+import { Layout, Input, List, Avatar, Typography, Space, theme, Empty, Badge, Spin, Button } from 'antd'
 import { SearchOutlined, TeamOutlined } from '@ant-design/icons'
 import { useQuery } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
@@ -8,6 +8,7 @@ import { ChatPanel } from '@/components/chat/ChatPanel'
 import { latestMessageText } from '@/utils/messageSummary'
 import { useAppUiStore, useCurrentTeamId } from '@/store/appUiStore'
 import type { Group } from '@/types'
+import './ChatWorkspacePage.css'
 
 const { Text } = Typography
 
@@ -15,6 +16,7 @@ interface MainGroupSession {
   projectId: string
   groupId: string
   groupTitle: string
+  projectName: string
   latestMessage?: Group['latestMessage']
   latestActivityAt?: string
   unreadCount?: number
@@ -35,43 +37,49 @@ export default function ChatWorkspacePage() {
   const routeTeamId = searchParams.get('teamId')
   const currentTeamId = useCurrentTeamId()
   const setCurrentTeam = useAppUiStore((s) => s.setCurrentTeam)
-  const [selected, setSelected] = useState<MainGroupSession | null>(null)
   const [keyword, setKeyword] = useState('')
+  const [fallback, setFallback] = useState<{ search: string; text: string } | null>(null)
 
   // 当前团队兜底：从未进入团队/项目页时取第一个团队
-  const { data: teams = [], isLoading: teamsLoading } = useQuery({
+  const teamsQuery = useQuery({
     queryKey: ['teams', 'mine'],
     queryFn: teamApi.listMine,
   })
-  const effectiveTeamId = routeTeamId ?? currentTeamId ?? teams[0]?.id ?? ''
+  const teams = teamsQuery.data ?? []
+  // Pending also includes offline/paused reads; they cannot establish an empty team list.
+  const teamsLoading = teamsQuery.isPending
+  const effectiveTeamId = teams.find((team) => team.id === routeTeamId)?.id
+    ?? teams.find((team) => team.id === currentTeamId)?.id ?? teams[0]?.id ?? ''
 
   // 团队确定后写入全局上下文 + 同步回 URL（刷新不丢团队；replace 不产生历史记录）
   useEffect(() => {
     if (!effectiveTeamId) return
     if (currentTeamId !== effectiveTeamId) setCurrentTeam(effectiveTeamId)
-    if (searchParams.get('teamId') !== effectiveTeamId) {
-      setSearchParams({ teamId: effectiveTeamId }, { replace: true })
-    }
-  }, [effectiveTeamId, currentTeamId, setCurrentTeam, searchParams, setSearchParams])
+  }, [effectiveTeamId, currentTeamId, setCurrentTeam])
 
   // 当前团队的项目 id 集合：主群聚合按团队过滤（聚合接口不返回 teamId）
-  const { data: teamProjects = [], isLoading: teamProjectsLoading } = useQuery({
+  const projectsQuery = useQuery({
     queryKey: ['teams', effectiveTeamId, 'projects'],
     queryFn: () => projectApi.listByTeam(effectiveTeamId),
     enabled: !!effectiveTeamId,
   })
+  const teamProjects = useMemo(() => projectsQuery.data ?? [], [projectsQuery.data])
+  const teamProjectsLoading = !!effectiveTeamId && projectsQuery.isPending
   const teamProjectIds = useMemo(() => new Set(teamProjects.map((p) => p.id)), [teamProjects])
   // 项目头像映射：主群会话头像 = 项目头像（v2.0.6）
   const projectAvatarById = useMemo(
     () => new Map(teamProjects.map((p) => [p.id, p.avatarUrl]).filter(([, url]) => !!url) as [string, string][]),
     [teamProjects],
   )
+  const projectNameById = useMemo(() => new Map(teamProjects.map((p) => [p.id, p.name])), [teamProjects])
 
   // 主群聚合：按最近活跃倒序；含 latestMessage / memberCount / unreadCount / mentionedUnread
-  const { data: mainGroups = [], isLoading: mainGroupsLoading } = useQuery({
+  const groupsQuery = useQuery({
     queryKey: ['chat', 'main-groups'],
     queryFn: groupApi.listMainGroups,
   })
+  const mainGroups = useMemo(() => groupsQuery.data ?? [], [groupsQuery.data])
+  const mainGroupsLoading = groupsQuery.isPending
 
   const loading = mainGroupsLoading || teamProjectsLoading || teamsLoading
 
@@ -83,22 +91,48 @@ export default function ChatWorkspacePage() {
         projectId: g.projectId,
         groupId: g.id,
         groupTitle: g.title,
+        projectName: projectNameById.get(g.projectId) ?? g.projectId,
         latestMessage: g.latestMessage,
         latestActivityAt: g.latestActivityAt,
         unreadCount: g.unreadCount,
         mentionedUnread: g.mentionedUnread,
       }))
-  }, [mainGroups, loading, teamProjectIds])
+  }, [mainGroups, loading, teamProjectIds, projectNameById])
 
-  // 数据就绪后自动选中第一个主群：修复刚进入时空态闪烁；
-  // 切团队后旧选中失效（不在新 sessions 中）时自动切回第一个
+  const initialError = teamsQuery.isLoadingError || projectsQuery.isLoadingError || groupsQuery.isLoadingError
+  const projectId = searchParams.get('projectId')
+  const groupId = searchParams.get('groupId')
+  const requested = sessions.find((session) => session.projectId === projectId && session.groupId === groupId)
+  const validTeam = routeTeamId === effectiveTeamId
+  const selected = !initialError && !loading ? (validTeam ? requested : undefined) ?? sessions[0] ?? null : null
+
+  // URL 是会话选择的来源。仅在数据成功就绪后规范化；瞬时请求失败不改写深链。
   useEffect(() => {
-    if (sessions.length === 0) return
-    setSelected((prev) => {
-      if (prev && sessions.some((s) => s.groupId === prev.groupId)) return prev
-      return sessions[0]
-    })
-  }, [sessions])
+    if (loading || initialError) return
+    const next = new URLSearchParams(searchParams)
+    if (effectiveTeamId) next.set('teamId', effectiveTeamId)
+    else next.delete('teamId')
+    if (selected) {
+      next.set('projectId', selected.projectId)
+      next.set('groupId', selected.groupId)
+    } else {
+      next.delete('projectId'); next.delete('groupId')
+    }
+    if (next.toString() === searchParams.toString()) return
+    if ((routeTeamId && !validTeam) || ((projectId || groupId) && (!requested || !validTeam))) {
+      setFallback({ search: next.toString(), text: selected ? '链接中的团队或会话不可用，已打开当前团队的可用群聊。' : '链接中的团队或会话不可用，当前没有可访问的项目群聊。' })
+    }
+    setSearchParams(next, { replace: true })
+  }, [loading, initialError, effectiveTeamId, selected, searchParams, setSearchParams, routeTeamId, validTeam, projectId, groupId, requested])
+
+  const selectSession = (session: MainGroupSession) => {
+    const next = new URLSearchParams(searchParams)
+    next.set('teamId', effectiveTeamId)
+    next.set('projectId', session.projectId)
+    next.set('groupId', session.groupId)
+    setFallback(null)
+    if (next.toString() !== searchParams.toString()) setSearchParams(next)
+  }
 
   const filtered = useMemo(() => {
     const q = keyword.trim().toLowerCase()
@@ -106,14 +140,16 @@ export default function ChatWorkspacePage() {
     return sessions.filter(
       (s) =>
         s.projectId.toLowerCase().includes(q) ||
+        s.projectName.toLowerCase().includes(q) ||
         s.groupTitle.toLowerCase().includes(q),
     )
   }, [sessions, keyword])
 
   return (
-    <Layout style={{ height: 'calc(100vh - 56px)', background: token.colorBgBase }}>
+    <Layout className="chat-workspace" style={{ height: 'calc(100dvh - 56px)', background: token.colorBgBase }}>
       <Layout.Sider
         width={280}
+        className="chat-workspace__sidebar"
         theme="dark"
         style={{
           borderRight: `1px solid ${token.colorBorder}`,
@@ -136,7 +172,8 @@ export default function ChatWorkspacePage() {
             项目主群
           </Text>
 
-          {loading ? (
+          {fallback?.search === searchParams.toString() ? <Text role="status" type="secondary">{fallback.text}</Text> : null}
+          {initialError ? <Empty description="会话列表加载失败，链接已保留"><Button onClick={() => { void teamsQuery.refetch(); if (effectiveTeamId) void projectsQuery.refetch(); void groupsQuery.refetch() }}>重试加载会话</Button></Empty> : loading ? (
             <div style={{ display: 'flex', justifyContent: 'center', padding: '40px 0' }}>
               <Spin size="small" />
             </div>
@@ -145,10 +182,15 @@ export default function ChatWorkspacePage() {
           ) : (
             <List
               dataSource={filtered}
+              rowKey={(s) => `${s.projectId}/${s.groupId}`}
               split={false}
               renderItem={(s) => (
-                <List.Item
-                  onClick={() => setSelected(s)}
+                <List.Item style={{ padding: 0, border: 'none' }}>
+                <button
+                  type="button"
+                  className="chat-workspace__session"
+                  onClick={() => selectSession(s)}
+                  aria-label={`打开群聊 ${s.groupTitle}，项目 ${s.projectName}`} aria-current={selected?.projectId === s.projectId && selected.groupId === s.groupId ? 'page' : undefined}
                   style={{
                     padding: '10px 12px',
                     cursor: 'pointer',
@@ -169,13 +211,12 @@ export default function ChatWorkspacePage() {
                     title={
                       <Space direction="vertical" size={0} style={{ width: '100%' }}>
                         <Space style={{ width: '100%', justifyContent: 'space-between' }}>
-                          <Text strong ellipsis style={{ maxWidth: 150 }}>
+                          <Text strong className="chat-workspace__group-title">
                             {s.groupTitle}
                           </Text>
                           <Space size={4}>
-                            {/* 正在查看的群不显示「有人@你」（人在群里，无需侧栏提示；离开时 markRead 清掉） */}
-                            {selected?.groupId !== s.groupId &&
-                            typeof s.mentionedUnread === 'number' &&
+                            {/* 已读确认成功后由缓存及后端摘要清除，当前选中不能代替已读。 */}
+                            {typeof s.mentionedUnread === 'number' &&
                             s.mentionedUnread > 0 ? (
                               <span
                                 style={{
@@ -192,10 +233,10 @@ export default function ChatWorkspacePage() {
                                 有人@你
                               </span>
                             ) : null}
-                            {/* 正在查看的群不显示未读红点（游标只在进群时推进，群内新消息红点由前端视觉隐藏） */}
-                            <Badge count={selected?.groupId === s.groupId ? 0 : s.unreadCount} overflowCount={99} size="small" />
+                            <Badge count={s.unreadCount} overflowCount={99} size="small" />
                           </Space>
                         </Space>
+                        <Text type="secondary" className="chat-workspace__project-name">项目：{s.projectName}</Text>
                       </Space>
                     }
                     description={
@@ -206,6 +247,7 @@ export default function ChatWorkspacePage() {
                       </Text>
                     }
                   />
+                </button>
                 </List.Item>
               )}
             />
@@ -213,7 +255,7 @@ export default function ChatWorkspacePage() {
         </div>
       </Layout.Sider>
 
-      {loading ? (
+      {initialError ? <Empty description="暂时无法打开群聊，请重试加载会话" /> : loading ? (
         <Layout style={{ background: token.colorBgBase }}>
           <div
             style={{
@@ -227,7 +269,7 @@ export default function ChatWorkspacePage() {
           </div>
         </Layout>
       ) : selected ? (
-        <ChatPanel key={selected.groupId} projectId={selected.projectId} groupId={selected.groupId} />
+        <ChatPanel key={`${selected.projectId}/${selected.groupId}`} projectId={selected.projectId} groupId={selected.groupId} />
       ) : (
         <Layout style={{ background: token.colorBgBase }}>
           <div

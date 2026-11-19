@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { projectEventsEnabled } from '@/api/projectEvents'
 import { useTaskNoCodeChangeStore } from '@/store/taskNoCodeChangeStore'
-import { invalidateProjectTaskEvent, invalidateProjectTaskModel } from './queryInvalidation'
+import { invalidateProjectChatAfterCursorExpiry, invalidateProjectTaskEvent, invalidateProjectTaskModel } from './queryInvalidation'
 import { ProjectEventConnection, type ProjectEventConnectionStatus } from './projectEventConnection'
 import { useRealtimeConnectionStatus } from './realtimeClient'
 
@@ -33,7 +33,11 @@ function createSharedConnection(projectId: string): SharedProjectConnection {
       }
       invalidateProjectTaskEvent(projectId, event)
     },
-    onCursorExpired: () => invalidateProjectTaskModel(projectId),
+    onCursorExpired: () => {
+      if (shared.refCount <= 0) return
+      invalidateProjectTaskModel(projectId)
+      invalidateProjectChatAfterCursorExpiry(projectId)
+    },
     onStatusChange: (status) => {
       shared.status = status
       for (const listener of shared.listeners) listener(status)
@@ -86,8 +90,23 @@ export function useProjectTaskDomainEvents(projectId: string, enabled = true): P
  * SSE 已连接时由事件驱动 Query 失效；只有断连或不可用时才保留轮询兜底。
  * 每个调用点共享同一项目连接，不会额外建立 EventSource。
  */
-export function useProjectTaskPollingInterval(projectId: string, fallbackIntervalMs: number): number | false {
+export type ChatConnectionStatus = 'connected' | 'connecting' | 'disconnected' | 'disabled'
+
+export function useProjectTaskSyncState(projectId: string, fallbackIntervalMs: number): {
+  pollingInterval: number | false
+  connectionStatus: ChatConnectionStatus
+} {
   const realtimeStatus = useRealtimeConnectionStatus()
-  const status = useProjectTaskDomainEvents(projectId, realtimeStatus !== 'connected')
-  return realtimeStatus === 'connected' || status === 'connected' ? false : fallbackIntervalMs
+  const enabled = projectEventsEnabled()
+  const status = useProjectTaskDomainEvents(projectId, enabled && realtimeStatus !== 'connected')
+  const connected = realtimeStatus === 'connected' || status === 'connected'
+  return {
+    pollingInterval: connected ? false : fallbackIntervalMs,
+    connectionStatus: !enabled ? 'disabled' : connected ? 'connected' :
+      realtimeStatus === 'connecting' || status === 'connecting' ? 'connecting' : 'disconnected',
+  }
+}
+
+export function useProjectTaskPollingInterval(projectId: string, fallbackIntervalMs: number): number | false {
+  return useProjectTaskSyncState(projectId, fallbackIntervalMs).pollingInterval
 }

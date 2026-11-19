@@ -11,6 +11,7 @@ import type { User } from '@/types'
 import { authApi, teamApi } from '@/api'
 import { AUTH_EXPIRED_EVENT } from '@/api/client'
 import { RSA_KEY_ID, encryptPassword } from '@/utils/rsaConfig'
+import { useChatSessionStore } from '@/store/chatSessionStore'
 
 interface AuthContextValue {
   /** 当前用户，null = 未登录 */
@@ -75,6 +76,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (cancelled) return
         const user = me.user
         if (!user?.id) throw new Error('GET /me 未返回用户')
+        useChatSessionStore.getState().activateUser(user.id)
         setUser(user)
         // /me 已返回 teams 聚合，直接取用；为空时兜底再查一次
         if (me.teams && me.teams.length > 0) {
@@ -107,6 +109,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // user 置 null 后，RequireAuth 守卫会自动跳回登录页
   useEffect(() => {
     function handleAuthExpired() {
+      useChatSessionStore.getState().activateUser(null)
       setUser(null)
       setHasTeam(false)
     }
@@ -174,6 +177,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } catch {
       // 即使接口失败也要清除本地状态
     }
+    useChatSessionStore.getState().activateUser(null)
     setUser(null)
     setHasTeam(false)
     localStorage.removeItem(ACCESS_TOKEN_KEY)
@@ -182,12 +186,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // ──── 把登录/注册结果一次性写入 state，供 LoginPage 在 navigate 的同一同步块内调用 ────
   const completeAuth = useCallback((session: AuthSession) => {
+    useChatSessionStore.getState().activateUser(session.user.id)
     setUser(session.user)
     setHasTeam(session.hasTeam)
   }, [])
 
   // ──── 更新当前用户资料（PATCH /me 成功后同步本地 user）────
   const updateUser = useCallback((next: User) => {
+    useChatSessionStore.getState().activateUser(next.id)
     setUser(next)
   }, [])
 
