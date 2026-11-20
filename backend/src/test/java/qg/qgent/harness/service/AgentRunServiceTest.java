@@ -9,13 +9,18 @@ import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.conditions.Wrapper;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.http.HttpStatus;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionSynchronizationUtils;
 import qg.qgent.chat.dto.MessageResponse;
 import qg.qgent.chat.service.MessageService;
 import qg.qgent.common.web.ApiException;
@@ -39,11 +44,21 @@ class AgentRunServiceTest {
                 new MapperBuilderAssistant(new MybatisConfiguration(), ""), AgentRunEntity.class);
     }
 
+    @BeforeEach
+    void initTransaction() {
+        TransactionSynchronizationManager.initSynchronization();
+    }
+
+    @AfterEach
+    void clearTransaction() {
+        TransactionSynchronizationManager.clearSynchronization();
+    }
+
     @Test
     void marksRunsLeftRunningByAPreviousProcessAsFailed() {
         when(runs.update(isNull(), any())).thenReturn(2);
 
-        service.failInterruptedRuns();
+        service.failInterruptedChildren();
 
         ArgumentCaptor<Wrapper<AgentRunEntity>> wrapper = ArgumentCaptor.forClass(Wrapper.class);
         verify(runs).update(isNull(), wrapper.capture());
@@ -52,7 +67,7 @@ class AgentRunServiceTest {
                                         wrapper.getValue())
                                 .getSqlSet())
                 .contains("status", "result", "finished_at");
-        assertThat(wrapper.getValue().getSqlSegment()).contains("status IN");
+        assertThat(wrapper.getValue().getSqlSegment()).contains("status IN", "parent_run_id IS NOT NULL");
         assertThat(
                         ((com.baomidou.mybatisplus.core.conditions.AbstractWrapper<?, ?, ?>)
                                         wrapper.getValue())
@@ -62,12 +77,19 @@ class AgentRunServiceTest {
     }
 
     @Test
-    void senderCanCancelOnlyRunningRootsFromTheSelectedMessage() {
+    void senderCanCancelRunningRootsFromTheSelectedMessageAfterCommit() {
         messageFrom(actor);
-        when(runs.update(isNull(), any())).thenReturn(2);
-        assertThat(service.cancel(actor, projectId, groupId, messageId)).isEqualTo(2);
+        AgentRunEntity root = runningRoot();
+        Runnable cancellation = mock(Runnable.class);
+        service.registerCancellationSignal(root.getId(), cancellation);
+        when(runs.selectList(any())).thenReturn(List.of(root));
+        when(runs.update(isNull(), any())).thenReturn(1);
+        assertThat(service.cancel(actor, projectId, groupId, messageId)).isEqualTo(1);
+        verifyNoInteractions(cancellation);
+        TransactionSynchronizationUtils.triggerAfterCommit();
+        verify(cancellation).run();
         ArgumentCaptor<Wrapper<AgentRunEntity>> wrapper = ArgumentCaptor.forClass(Wrapper.class);
-        verify(runs).update(isNull(), wrapper.capture());
+        verify(runs).selectList(wrapper.capture());
         String sql = wrapper.getValue().getSqlSegment();
         assertThat(sql)
                 .contains(
@@ -80,11 +102,35 @@ class AgentRunServiceTest {
     }
 
     @Test
+    void queuedRunCanBeCancelledBeforeAnyWorkerClaimsIt() {
+        messageFrom(actor);
+        AgentRunEntity root = runningRoot();
+        root.setAgentId(TestIds.next());
+        root.setStatus(RunStatus.QUEUED);
+        when(runs.selectList(any())).thenReturn(List.of(root));
+        when(runs.update(isNull(), any())).thenReturn(1, 0);
+
+        assertThat(service.cancel(actor, projectId, groupId, messageId)).isEqualTo(1);
+        assertThat(service.claimRoot(root.getId())).isNull();
+        verify(messages).sendAgentRunReply(root.getAgentId(), groupId, messageId, root.getId(), "Agent 运行已取消");
+    }
+
+    @Test
+    void queuedRunCanOnlyBeClaimedOnce() {
+        AgentRunEntity root = runningRoot();
+        when(runs.update(isNull(), any())).thenReturn(1, 0);
+        when(runs.selectById(root.getId())).thenReturn(root);
+
+        assertThat(service.claimRoot(root.getId())).isSameAs(root);
+        assertThat(service.claimRoot(root.getId())).isNull();
+    }
+
+    @Test
     void cancellingAnotherUsersExecutionRequiresProjectAdmin() {
         messageFrom(TestIds.next());
         service.cancel(actor, projectId, groupId, messageId);
         verify(access).requireProjectAdmin(projectId, actor);
-        verify(runs).update(isNull(), any());
+        verify(runs).selectList(any());
     }
 
     @Test
@@ -150,11 +196,7 @@ class AgentRunServiceTest {
         messageFrom(actor);
         AtomicReference<String> persistedStatus = new AtomicReference<>("RUNNING");
         AtomicInteger updateCount = new AtomicInteger();
-        when(runs.selectList(any()))
-                .thenAnswer(invocation ->
-                        "RUNNING".equals(persistedStatus.get())
-                                ? java.util.List.of(root)
-                                : java.util.List.of());
+        when(runs.selectList(any())).thenReturn(List.of(root));
         org.mockito.Mockito.doAnswer(
                         invocation -> {
                             Wrapper<AgentRunEntity> update = invocation.getArgument(1);

@@ -1,11 +1,14 @@
 package qg.qgent.harness.runtime;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.TransientDataAccessException;
 import org.springframework.stereotype.Service;
 import qg.qgent.agent.entity.AgentEntity;
 import qg.qgent.agent.service.AgentApplicationService;
@@ -13,19 +16,19 @@ import qg.qgent.agent.service.AgentService;
 import qg.qgent.agent.tool.AgentApplicationTools;
 import qg.qgent.attachment.service.AttachmentService;
 import qg.qgent.attachment.tool.ReadAttachmentTool;
-import qg.qgent.chat.dto.MessageSendRequest;
 import qg.qgent.chat.event.MessageSentEvent;
 import qg.qgent.chat.service.ChatHistoryService;
 import qg.qgent.chat.service.CrossGroupAccessService;
-import qg.qgent.chat.service.MessageService;
 import qg.qgent.chat.tool.ChatHistorySearchTool;
 import qg.qgent.chat.tool.CrossGroupTools;
+import qg.qgent.common.web.ApiException;
 import qg.qgent.github.tool.GitHubCapability;
 import qg.qgent.github.tool.GitHubTools;
 import qg.qgent.harness.briefing.BriefingService;
 import qg.qgent.harness.briefing.BriefingService.Scope;
 import qg.qgent.harness.entity.AgentRunEntity;
 import qg.qgent.harness.entity.RunStatus;
+import qg.qgent.harness.service.AgentRunCompletion;
 import qg.qgent.harness.service.AgentRunService;
 import qg.qgent.harness.tool.ParallelToolCallback;
 import qg.qgent.harness.tool.ToolResult;
@@ -57,6 +60,12 @@ import java.util.concurrent.Executor;
  */
 @Service
 public class AgentChatService {
+    private static final Logger log = LoggerFactory.getLogger(AgentChatService.class);
+    private static final String STANDARD_WORKFLOW_TOOL = "use_standard_workflow";
+    private static final String REPLACE_FILE_TEXT_TOOL = "replace_file_text";
+    private static final Set<String> FOCUSED_EDIT_TOOLS =
+        Set.of(REPLACE_FILE_TEXT_TOOL, "read_file", "edit_file", "run_command", "command_output",
+            STANDARD_WORKFLOW_TOOL);
     private static final Set<String> CHILD_CONTROL_TOOLS =
         Set.of(
             "start_subagent",
@@ -74,7 +83,7 @@ public class AgentChatService {
     private final BriefingService briefing;
     private final SkillService skills;
     private final ChatHistoryService history;
-    private final MessageService messages;
+    private final AgentRunCompletion completion;
     private final AgentRunService runService;
     private final AgentStreamService streams;
     private final SandboxSessionManager sessions;
@@ -89,6 +98,7 @@ public class AgentChatService {
     private final AgentApplicationService agentApplications;
     private final Executor childExecutor;
     private final int maxSubagents;
+    private final boolean focusedEditEnabled;
 
     public AgentChatService(
         GitHubCapability github,
@@ -99,7 +109,7 @@ public class AgentChatService {
         BriefingService briefing,
         SkillService skills,
         ChatHistoryService history,
-        MessageService messages,
+        AgentRunCompletion completion,
         AgentRunService runService,
         AgentStreamService streams,
         SandboxSessionManager sessions,
@@ -113,8 +123,9 @@ public class AgentChatService {
         AgentService agents,
         AgentApplicationService agentApplications,
         @Qualifier("agentSubagentExecutor") Executor childExecutor,
-        @Value("${app.agent.max-subagents:8}") int maxSubagents) {
-        if (maxSubagents < 1) throw new IllegalArgumentException("max-subagents 必须大于 0");
+        @Value("${app.agent.max-subagents:0}") int maxSubagents,
+        @Value("${app.agent.focused-edit-enabled:true}") boolean focusedEditEnabled) {
+        if (maxSubagents < 0) throw new IllegalArgumentException("max-subagents 不能小于 0");
         this.github = github;
         this.workspaceCommands = workspaceCommands;
         this.workspaces = workspaces;
@@ -123,7 +134,7 @@ public class AgentChatService {
         this.briefing = briefing;
         this.skills = skills;
         this.history = history;
-        this.messages = messages;
+        this.completion = completion;
         this.runService = runService;
         this.streams = streams;
         this.sessions = sessions;
@@ -138,15 +149,17 @@ public class AgentChatService {
         this.agentApplications = agentApplications;
         this.childExecutor = childExecutor;
         this.maxSubagents = maxSubagents;
+        this.focusedEditEnabled = focusedEditEnabled;
     }
 
     /**
      * Runs one conversation for a committed @Agent message and replies as that same Agent.
      */
-    public void replyToMention(MessageSentEvent event, Long agentId, String instruction) {
-        // 未启用或不属于本项目的 Agent 不产生运行，也不产生回复。
-        AgentEntity agent = agents.requireActiveProjectAgent(event.projectId(), agentId);
-        AgentRunEntity root = runService.startRoot(agentId, event, instruction);
+    public void executeRoot(AgentRunEntity root) {
+        Long agentId = root.getAgentId();
+        AgentEntity agent = agents.requireActiveProjectAgent(root.getProjectId(), agentId);
+        MessageSentEvent event = new MessageSentEvent(root.getCreatedBy(), root.getProjectId(),
+            root.getGroupId(), root.getTriggerMessageId(), List.of());
         RunStreamSink sink = streams.sink(root);
         WorkContext work = new WorkContext(event, agentId, agent, root.getId());
         RunLifecycle lifecycle = new RunLifecycle(runService, sessions, work);
@@ -164,24 +177,35 @@ public class AgentChatService {
         ChildRuns children = work.children;
         Thread rootWorker = Thread.currentThread();
         boolean wasInterrupted = rootWorker.isInterrupted();
-        runService.registerCancellationSignal(root.getId(), () -> lifecycle.cancelled(root));
         RunStatus status = RunStatus.FAILED;
         String resultText = "Agent 执行失败，请稍后重试";
         int rounds = 0;
         try {
+            runService.registerCancellationSignal(root.getId(), () -> lifecycle.cancelled(root));
+            boolean focusedEdit = focusedEditEnabled && Boolean.TRUE.equals(agent.getDefaultAgent())
+                && (agent.getSystemPrompt() == null || agent.getSystemPrompt().isBlank())
+                && FocusedEdit.matches(root.getInstruction());
             String input =
-                userInput(
+                focusedEdit
+                    ? root.getInstruction() + "\n\n" + briefing.focusedEditContext(
+                        event.actor(), event.projectId(), event.groupId(), agentId)
+                    : userInput(
                     event.actor(),
                     event.projectId(),
                     event.groupId(),
                     agentId,
                     Scope.ROOT,
-                    instruction);
+                    root.getInstruction());
             UserMessage user = new UserMessage(input);
+            boolean canDelegate = maxSubagents > 0;
             AgentLoop.Conversation conversation =
-                loop.conversation(briefing.systemPrompt(agent, Scope.ROOT), List.of(user));
+                loop.conversation(focusedEdit ? briefing.focusedEditPrompt(agent)
+                    : briefing.systemPrompt(agent, Scope.ROOT, canDelegate), List.of(user));
             ChildRuns.Execution execution = new ChildRuns.Execution(root, conversation, null, ".");
             ConversationTools tools = conversationTools(work, execution, true);
+            tools.focusedEdit = focusedEdit;
+            log.info("Agent workflow selected runId={} workflow={}", root.getId(),
+                focusedEdit ? "focused-edit" : "standard");
             AgentLoop.Result result =
                 loop.run(
                     root.getId(),
@@ -195,28 +219,48 @@ public class AgentChatService {
             rounds = result.rounds();
         } catch (RuntimeException exception) {
             status = work.isCancelled() ? RunStatus.CANCELLED : RunStatus.FAILED;
-            resultText = failure(exception);
+            if (status == RunStatus.FAILED) {
+                String code = exception instanceof ApiException api
+                    ? api.code() : exception.getClass().getSimpleName();
+                log.warn("Agent execution failed runId={} code={}", root.getId(), code);
+                if (exception instanceof ApiException api) resultText = api.getMessage();
+            }
         } finally {
-            lifecycle.finish(root, status, resultText, rounds);
-            // finishRoot 在并发取消时可能把运行改为 CANCELLED，终态事件以记录为准。
-            sink.finished();
-            runService.unregisterCancellationSignal(root.getId());
-            Thread.interrupted();
-            if (wasInterrupted) rootWorker.interrupt();
+            try {
+                status = lifecycle.finish(root, status, resultText, rounds);
+                // 取消可能打断工作线程；数据库收尾必须在清除中断标记后进行。
+                Thread.interrupted();
+                AgentRunEntity finished;
+                try {
+                    finished = completion.complete(root.getId(), status, resultText, rounds);
+                } catch (TransientDataAccessException transientFailure) {
+                    log.info("Retrying Agent result transaction runId={} type={}",
+                        root.getId(), transientFailure.getClass().getSimpleName());
+                    finished = completion.complete(root.getId(), status, resultText, rounds);
+                }
+                if (finished != null) {
+                    root.setStatus(finished.getStatus());
+                    root.setResult(finished.getResult());
+                    root.setRounds(finished.getRounds());
+                    root.setFinishedAt(finished.getFinishedAt());
+                }
+            } finally {
+                runService.unregisterCancellationSignal(root.getId());
+                Thread.interrupted();
+                try {
+                    sink.finished();
+                } finally {
+                    if (wasInterrupted) rootWorker.interrupt();
+                }
+            }
         }
-        MessageSendRequest reply = new MessageSendRequest();
-        reply.setType("TEXT");
-        reply.setContent(Map.of("text", answer(root)));
-        reply.setReplyToId(event.messageId());
-        reply.setClientMessageId("qgent-reply:" + root.getId());
-        messages.sendAsAgent(agentId, event.groupId(), reply);
     }
 
     private List<ToolCallback> callbacks(
         WorkContext work, ChildRuns.Execution execution, ConversationTools tools) {
         if (work.isCancelled() || execution.isStopRequested())
             throw new IllegalStateException("Agent 运行已取消");
-        return List.of(tools.callbacks());
+        return tools.callbacks();
     }
 
     private ConversationTools conversationTools(
@@ -238,15 +282,6 @@ public class AgentChatService {
         Scope scope,
         String instruction) {
         return instruction + "\n\n" + briefing.context(actor, projectId, groupId, agentId, scope);
-    }
-
-    private String answer(AgentRunEntity root) {
-        return root.getResult() == null ? "Agent 本次运行未返回文本" : root.getResult();
-    }
-
-    private String failure(RuntimeException exception) {
-        String message = exception.getMessage();
-        return "Agent 执行失败：" + (message == null || message.isBlank() ? "请稍后重试" : message);
     }
 
     private Long requiredId(String value) {
@@ -283,6 +318,9 @@ public class AgentChatService {
         private final GitHubTools githubTools;
         private final CodingTools codingTools;
         private final WorkspaceTools workspaceTools;
+        private boolean focusedEdit;
+        private List<ToolCallback> focusedCallbacks;
+        private List<ToolCallback> standardCallbacks;
 
         private ConversationTools(
             WorkContext work, ChildRuns.Execution execution, boolean canDelegate) {
@@ -351,7 +389,20 @@ public class AgentChatService {
             this.codingTools = new CodingTools(session, files);
         }
 
-        private ToolCallback[] callbacks() {
+        private List<ToolCallback> callbacks() {
+            if (focusedEdit) {
+                if (focusedCallbacks == null) {
+                    focusedCallbacks = Arrays.stream(ParallelToolCallback.from(this, workspaceTools, codingTools))
+                        .filter(callback -> FOCUSED_EDIT_TOOLS.contains(callback.getToolDefinition().name()))
+                        .toList();
+                }
+                return focusedCallbacks;
+            }
+            if (standardCallbacks == null) standardCallbacks = standardCallbacks();
+            return standardCallbacks;
+        }
+
+        private List<ToolCallback> standardCallbacks() {
             List<Object> tools =
                 new ArrayList<>(
                     List.of(
@@ -370,10 +421,36 @@ public class AgentChatService {
             if (applicationTools != null) tools.add(applicationTools);
             List<ToolCallback> result =
                 new ArrayList<>(Arrays.asList(ParallelToolCallback.from(tools.toArray())));
-            if (!canDelegate)
+            result.removeIf(callback -> {
+                String name = callback.getToolDefinition().name();
+                return STANDARD_WORKFLOW_TOOL.equals(name) || REPLACE_FILE_TEXT_TOOL.equals(name);
+            });
+            if (!canDelegate || maxSubagents == 0)
                 result.removeIf(callback ->
-                    CHILD_CONTROL_TOOLS.contains(callback.getToolDefinition().name()));
-            return result.toArray(ToolCallback[]::new);
+                    CHILD_CONTROL_TOOLS.contains(callback.getToolDefinition().name())
+                        && !(canDelegate && "cancel_agent".equals(callback.getToolDefinition().name())));
+            return List.copyOf(result);
+        }
+
+        @Tool(name = REPLACE_FILE_TEXT_TOOL,
+            description = "直接替换已明确给出的旧文本。工具自动读取文件版本，只替换唯一匹配；冲突或多处匹配时先读文件再决定。")
+        public ToolResult replaceFileText(
+            @ToolParam(description = "工作区相对文件路径") String path,
+            @ToolParam(description = "用户给出的准确旧文本") String oldText,
+            @ToolParam(description = "用户要求替换为的新文本") String newText) {
+            return codingTools.replaceUniqueText(path, oldText, newText);
+        }
+
+        @Tool(name = STANDARD_WORKFLOW_TOOL,
+            description = "在当前任务中启用完整工具和近期群聊上下文，保留已经完成的操作。")
+        public ToolResult useStandardWorkflow() {
+            if (!focusedEdit) return ToolResult.ok();
+            var event = work.event;
+            String recentContext = briefing.recentGroupContext(event.actor(), event.projectId(), event.groupId());
+            execution.conversation.stageWorkflow(
+                briefing.systemPrompt(work.agent, Scope.ROOT, maxSubagents > 0), recentContext);
+            focusedEdit = false;
+            return ToolResult.ok();
         }
 
         @Tool(
@@ -405,7 +482,7 @@ public class AgentChatService {
                 childDirectory,
                 text ->
                     loop.conversation(
-                        briefing.systemPrompt(work.agent, Scope.CHILD),
+                        briefing.systemPrompt(work.agent, Scope.CHILD, false),
                         List.of(
                             new UserMessage(
                                 userInput(

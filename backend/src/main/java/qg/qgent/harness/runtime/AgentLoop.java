@@ -1,6 +1,10 @@
 package qg.qgent.harness.runtime;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.openai.errors.OpenAIIoException;
+import com.openai.errors.OpenAIServiceException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.messages.*;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
@@ -10,10 +14,17 @@ import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.content.Media;
 import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.ai.tool.ToolCallback;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
+import reactor.core.Exceptions;
+import reactor.core.publisher.Flux;
+import reactor.util.retry.Retry;
 
+import java.time.Duration;
 import java.util.*;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
@@ -23,19 +34,30 @@ import java.util.function.Supplier;
  */
 @Component
 public class AgentLoop {
+    private static final Logger log = LoggerFactory.getLogger(AgentLoop.class);
     private final ChatModel model;
     private final ToolCallExecutor toolCalls;
     private final int maxRounds;
+    private final Duration modelIdleTimeout;
 
+    @Autowired
     public AgentLoop(
         ChatModel model,
         ObjectMapper json,
         @Value("${app.agent.max-rounds:30}") int maxRounds,
-        @Value("${app.agent.max-parallel-tool-calls:4}") int maxParallelToolCalls) {
+        @Value("${app.agent.max-parallel-tool-calls:4}") int maxParallelToolCalls,
+        @Value("${app.agent.model-idle-timeout:45s}") Duration modelIdleTimeout) {
         this.model = model;
         this.toolCalls = new ToolCallExecutor(json, maxParallelToolCalls);
         if (maxRounds < 1) throw new IllegalArgumentException("max-rounds 必须大于 0");
+        if (modelIdleTimeout.isNegative() || modelIdleTimeout.isZero())
+            throw new IllegalArgumentException("model-idle-timeout 必须大于 0");
         this.maxRounds = maxRounds;
+        this.modelIdleTimeout = modelIdleTimeout;
+    }
+
+    AgentLoop(ChatModel model, ObjectMapper json, int maxRounds, int maxParallelToolCalls) {
+        this(model, json, maxRounds, maxParallelToolCalls, Duration.ofSeconds(45));
     }
 
     /**
@@ -123,7 +145,17 @@ public class AgentLoop {
                 request.add(new SystemMessage(conversation.systemPrompt()));
                 request.addAll(conversation.history());
                 sink.roundStarted();
-                ChatResponse response = chat(new Prompt(request, options), sink, cancelled);
+                ChatResponse response;
+                try {
+                    response = chat(runId, round, new Prompt(request, options), sink, cancelled);
+                } catch (RuntimeException error) {
+                    if (Thread.currentThread().isInterrupted() || cancelled.getAsBoolean())
+                        return new Result(false, "Agent 运行已取消", round);
+                    ModelFailure failure = modelFailure(error);
+                    log.warn("Agent model failed runId={} round={} category={} type={}",
+                        runId, round, failure.name(), error.getClass().getSimpleName());
+                    return new Result(false, failure.message, round);
+                }
                 if (Thread.currentThread().isInterrupted() || cancelled.getAsBoolean()) {
                     return new Result(false, "Agent 运行已取消", round);
                 }
@@ -162,6 +194,7 @@ public class AgentLoop {
                 if (results.cancelled()) return new Result(false, "Agent 运行已取消", round);
                 conversation.append(
                     ToolResponseMessage.builder().responses(results.responses()).build());
+                conversation.applyStagedWorkflow();
                 // 图片必须在完整工具结果之后追加，且只在确实还有下一轮模型调用时发送。
                 if (round < maxRounds) conversation.appendAll(conversation.takeStagedImages());
             }
@@ -175,15 +208,81 @@ public class AgentLoop {
      * 逐步消费模型流：正文增量交给实时层，结束时用聚合结果保留完整 tool calls 与供应商元数据。
      * reasoning 增量按 chunk 拼接，避免聚合器只保留最后一段。
      */
-    private ChatResponse chat(Prompt prompt, RunStreamSink sink, BooleanSupplier cancelled) {
+    private ChatResponse chat(
+        Long runId, int round, Prompt prompt, RunStreamSink sink, BooleanSupplier cancelled) {
         MessageAggregator aggregator = new MessageAggregator();
         AtomicReference<ChatResponse> completed = new AtomicReference<>();
+        AtomicReference<Throwable> streamFailure = new AtomicReference<>();
         StringBuilder reasoning = new StringBuilder();
-        model.stream(prompt)
+        AtomicLong firstChunkMs = new AtomicLong(-1);
+        long started = System.nanoTime();
+        Flux.defer(() -> cancelled.getAsBoolean() ? Flux.<ChatResponse>empty() : model.stream(prompt))
+            .timeout(modelIdleTimeout)
+            .doOnNext(chunk -> firstChunkMs.compareAndSet(-1, elapsedMillis(started)))
+            .retryWhen(Retry.backoff(2, Duration.ofMillis(400))
+                .maxBackoff(Duration.ofSeconds(2))
+                .filter(error -> firstChunkMs.get() < 0 && !cancelled.getAsBoolean()
+                    && modelFailure(error).retryable)
+                .doBeforeRetry(retry -> log.info("Retrying Agent model runId={} round={} retry={} category={}",
+                    runId, round, retry.totalRetries() + 1, modelFailure(retry.failure()).name()))
+                .onRetryExhaustedThrow((spec, retry) -> retry.failure()))
+            .onErrorResume(error -> {
+                // 供应商错误只走下方的分类日志，避免聚合器记录原始响应。
+                streamFailure.set(error);
+                return Flux.empty();
+            })
             .doOnNext(chunk -> forward(chunk, sink, cancelled, reasoning))
             .transform(flux -> aggregator.aggregate(flux, completed::set))
-            .blockLast();
-        return withFullReasoning(completed.get(), reasoning);
+            .blockLast(Duration.ofMinutes(3).plus(modelIdleTimeout));
+        if (streamFailure.get() != null) throw Exceptions.propagate(streamFailure.get());
+        ChatResponse response = completed.get();
+        var usage = response == null || response.getMetadata() == null
+            ? null : response.getMetadata().getUsage();
+        var options = (OpenAiChatOptions) prompt.getOptions();
+        log.info("Agent model round completed runId={} round={} tools={} firstChunkMs={} elapsedMs={} promptTokens={} completionTokens={}",
+            runId, round, options.getToolCallbacks().size(), firstChunkMs.get(), elapsedMillis(started),
+            usage == null ? null : usage.getPromptTokens(), usage == null ? null : usage.getCompletionTokens());
+        return withFullReasoning(response, reasoning);
+    }
+
+    private static long elapsedMillis(long started) {
+        return Duration.ofNanos(System.nanoTime() - started).toMillis();
+    }
+
+    private static ModelFailure modelFailure(Throwable error) {
+        for (Throwable cause = error; cause != null; cause = cause.getCause()) {
+            if (cause instanceof OpenAIServiceException service) {
+                return switch (service.statusCode()) {
+                    case 401, 403 -> ModelFailure.AUTH;
+                    case 408, 504 -> ModelFailure.TIMEOUT;
+                    case 429 -> ModelFailure.RATE_LIMIT;
+                    case 500, 502, 503 -> ModelFailure.UNAVAILABLE;
+                    default -> ModelFailure.REJECTED;
+                };
+            }
+            if (cause instanceof TimeoutException || cause instanceof java.net.SocketTimeoutException)
+                return ModelFailure.TIMEOUT;
+            if (cause instanceof OpenAIIoException || cause instanceof java.net.ConnectException)
+                return ModelFailure.UNAVAILABLE;
+        }
+        return ModelFailure.UNKNOWN;
+    }
+
+    private enum ModelFailure {
+        AUTH("模型服务鉴权失败，请检查 API Key 或模型权限", false),
+        RATE_LIMIT("模型服务请求受限，请稍后重试", true),
+        TIMEOUT("模型服务响应超时，请稍后重试", true),
+        UNAVAILABLE("模型服务暂不可用，请稍后重试", true),
+        REJECTED("模型服务拒绝了请求，请检查模型配置或缩短输入", false),
+        UNKNOWN("模型调用失败，请稍后重试", false);
+
+        private final String message;
+        private final boolean retryable;
+
+        ModelFailure(String message, boolean retryable) {
+            this.message = message;
+            this.retryable = retryable;
+        }
     }
 
     private void forward(
@@ -247,9 +346,10 @@ public class AgentLoop {
      * A conversation can be resumed during the current root run without copying another agent's history.
      */
     public static final class Conversation {
-        private final String systemPrompt;
+        private String systemPrompt;
         private final List<Message> history;
         private final List<StagedImage> stagedImages = new ArrayList<>();
+        private StagedWorkflow stagedWorkflow;
 
         private Conversation(String systemPrompt, List<Message> initialHistory) {
             this.systemPrompt = systemPrompt;
@@ -259,6 +359,19 @@ public class AgentLoop {
         public synchronized void addUserMessage(String text) {
             history.add(new UserMessage(text));
         }
+
+        synchronized void stageWorkflow(String prompt, String context) {
+            stagedWorkflow = new StagedWorkflow(prompt, context);
+        }
+
+        private synchronized void applyStagedWorkflow() {
+            if (stagedWorkflow == null) return;
+            systemPrompt = stagedWorkflow.prompt();
+            history.add(new UserMessage(stagedWorkflow.context()));
+            stagedWorkflow = null;
+        }
+
+        private record StagedWorkflow(String prompt, String context) {}
 
         /**
          * 图片暂存在各自会话中，由 loop 在工具结果之后追加。

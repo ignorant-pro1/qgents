@@ -107,7 +107,7 @@ public class MessageService {
 
     /**
      * 对被 @ 的用户生成站内通知（MESSAGE_MENTION）：发送者、群名与消息文本摘要进通知内容；
-     * 排除发送者本人；被提及的 Agent 由消息监听器启动 loop。通知失败不影响消息发送。
+     * 排除发送者本人；被提及的 Agent 由消息监听器登记任务。通知失败不影响消息发送。
      * <p>
      * 由 消息提交后的监听器 在消息事务提交后异步调用，不再占用发送事务与群行锁。
      *
@@ -244,6 +244,25 @@ public class MessageService {
         }
         groupService.requireGroupAgent(groupId, agentId);
         return doSend(group.getProjectId(), groupId, null, agentId, body);
+    }
+
+    /**
+     * 运行收尾专用；群、成员身份或原消息已移除时，仍允许保存可查询的运行终态。
+     */
+    @Transactional
+    public void sendAgentRunReply(Long agentId, Long groupId, Long messageId, Long runId, String text) {
+        MessageSendRequest reply = new MessageSendRequest();
+        reply.setType("TEXT");
+        reply.setContent(Map.of("text", text));
+        reply.setReplyToId(messageId);
+        reply.setClientMessageId("qgent-reply:" + runId);
+        try {
+            sendAsAgent(agentId, groupId, reply);
+        } catch (ApiException error) {
+            if (!Set.of("GROUP_NOT_FOUND", "AGENT_NOT_IN_GROUP", "REPLY_MESSAGE_NOT_FOUND")
+                .contains(error.code())) throw error;
+            log.info("Agent run reply target removed runId={} code={}", runId, error.code());
+        }
     }
 
     private ChatGroupEntity lockGroup(Long groupId) {

@@ -4,6 +4,7 @@ package qg.qgent.harness.entity;
  * agent_runs.status 的取值；数据库按枚举名存字符串。
  */
 public enum RunStatus {
+    QUEUED,
     RUNNING,
     CANCELLING,
     CANCELLED,

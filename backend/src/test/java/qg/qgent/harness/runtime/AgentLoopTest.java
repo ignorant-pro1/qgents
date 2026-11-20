@@ -5,6 +5,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.net.ConnectException;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -61,6 +62,36 @@ class AgentLoopTest {
         assertThat(result.text()).isEqualTo("你好");
         assertThat(tools.calls).isZero();
         verify(model, times(1)).call(any(Prompt.class));
+    }
+
+    @Test
+    void retriesTransientModelFailureBeforeAnyChunk() {
+        AgentLoop loop = loop(1);
+        when(model.stream(any(Prompt.class)))
+                .thenReturn(Flux.error(new ConnectException()), Flux.just(reply("done")));
+
+        var result = loop.run(TestIds.next(), "agent", List.of(new UserMessage("task")),
+                List::of, () -> false);
+
+        assertThat(result.success()).isTrue();
+        assertThat(result.text()).isEqualTo("done");
+        assertThat(result.rounds()).isEqualTo(1);
+        verify(model, times(2)).stream(any(Prompt.class));
+    }
+
+    @Test
+    void doesNotRetryOrRunToolsAfterAStreamHasStarted() {
+        AgentLoop loop = loop(2);
+        when(model.stream(any(Prompt.class)))
+                .thenReturn(Flux.just(toolCall("count")).concatWith(Flux.error(new ConnectException())));
+        Counter tools = new Counter();
+
+        var result = loop.run(TestIds.next(), "agent", List.of(new UserMessage("task")),
+                () -> Arrays.asList(ToolCallbacks.from(tools)), () -> false);
+
+        assertThat(result.success()).isFalse();
+        assertThat(tools.calls).isZero();
+        verify(model, times(1)).stream(any(Prompt.class));
     }
 
     @Test

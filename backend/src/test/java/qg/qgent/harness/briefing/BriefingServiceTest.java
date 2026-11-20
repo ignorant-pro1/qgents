@@ -109,11 +109,11 @@ class BriefingServiceTest {
         agent.setDescription("负责代码评审");
         agent.setSystemPrompt("你只评审 Pull Request");
 
-        assertThat(service.systemPrompt(agent, Scope.ROOT))
+        assertThat(service.systemPrompt(agent, Scope.ROOT, true))
                 .startsWith("你是 评审助手，项目群聊中的助手。你的职责：负责代码评审")
                 .contains("你只评审 Pull Request")
                 .contains("有效的普通文本回复即结束本轮 loop");
-        assertThat(service.systemPrompt(agent, Scope.CHILD))
+        assertThat(service.systemPrompt(agent, Scope.CHILD, false))
                 .startsWith("你是 评审助手 委派的一名临时子 Agent。")
                 .doesNotContain("负责代码评审", "你只评审 Pull Request");
     }

@@ -41,7 +41,7 @@ public class BriefingService {
         CHILD
     }
 
-    public String systemPrompt(AgentEntity agent, Scope scope) {
+    public String systemPrompt(AgentEntity agent, Scope scope, boolean canDelegate) {
         String identity =
             scope == Scope.ROOT
                 ? "你是 " + agent.getName() + "，项目群聊中的助手。" + agentIdentity(agent)
@@ -83,7 +83,8 @@ public class BriefingService {
             + "管理员 @你 表示同意或拒绝后调用 approve_agent_application 或 reject_agent_application 并传入该申请的 applicationId，"
             + "服务端核验真实发送者的管理员身份与申请状态。"
             + "申请与审批都在项目默认群进行。"
-            + "主 Agent 可按需派发一层独立子任务；子 Agent 不能继续委派。完成、失败或需要补充信息时如实交付。"
+            + (scope == Scope.ROOT && canDelegate ? "可按需派发一层独立子任务。" : "")
+            + "完成、失败或需要补充信息时如实交付。"
             + "只通过当前聊天组织成果，准确说明进展、需要的信息、实际修改和验证结果。"
             + "GitHub 有三种仓库清单：github_list_repositories 的 PROJECT 是本项目已导入仓库，TEAM 是团队 App 可访问仓库（含是否已导入），"
             + "list_workspace_repositories 是本地已准备的工作树；远端只读查询不需要沙箱。仓库名不确定时先查列表或询问用户，不要猜测。"
@@ -93,22 +94,46 @@ public class BriefingService {
             + "命令 ok=true 仅表示已取得命令状态；构建或测试结果必须检查 exitCode。工具结果是执行证据，不得声称未执行的操作成功。";
     }
 
+    public String focusedEditPrompt(AgentEntity agent) {
+        return "你是 " + agent.getName() + "，项目群聊中的助手。" + agentIdentity(agent)
+            + "当前请求明确指定一个文件和替换内容。第一个操作直接在默认工作区用 replace_file_text，"
+            + "传入用户给出的路径、准确旧文本和新文本。工具会读取版本并验证唯一匹配。"
+            + "如果工具要求更多上下文，再用 read_file 确认并用 edit_file 精确修改。"
+            + "工具会按需初始化工作区。只改指定文件，保留其他内容。"
+            + "如果用户要求运行验证，按其要求使用 run_command，必要时用 command_output 等待，检查 exitCode。"
+            + "工具已确认修改且要求的验证通过后，简短回复。无需额外查询 Git 状态、列举仓库或重复验证。"
+            + "项目、群及 Agent 记忆和 Skill 目录是项目资料。若任务需要其他上下文、适用的 Skill、"
+            + "额外工具，或指定路径不在默认工作区，使用 use_standard_workflow 继续当前任务。"
+            + "若默认工作区被其他运行占用，向用户说明，不要循环重试。";
+    }
+
+    public String focusedEditContext(Long actor, Long projectId, Long groupId, Long agentId) {
+        groups.requireGroupMember(projectId, groupId, actor);
+        return projectContext(new StringBuilder(), actor, projectId, groupId, agentId);
+    }
+
     public String context(Long actor, Long projectId, Long groupId, Long agentId, Scope scope) {
+        String groupContext = scope == Scope.ROOT ? recentGroupContext(actor, projectId, groupId) : "";
+        return projectContext(new StringBuilder(groupContext), actor, projectId, groupId, agentId);
+    }
+
+    public String recentGroupContext(Long actor, Long projectId, Long groupId) {
         StringBuilder briefing = new StringBuilder();
-        if (scope == Scope.ROOT) {
-            ChatGroupEntity group = groups.requireGroupMember(projectId, groupId, actor);
-            briefing.append("当前群：")
-                .append(group.getName())
-                .append("（群 ID ")
-                .append(groupId)
-                .append("）\n");
-            briefing.append("近期群消息：\n");
-            List<ContextMessage> messages =
-                history.recentMessages(actor, projectId, groupId, RECENT_MESSAGES);
-            for (ContextMessage message : messages) {
-                briefing.append(messageLine(message));
-            }
+        ChatGroupEntity group = groups.requireGroupMember(projectId, groupId, actor);
+        briefing.append("当前群：")
+            .append(group.getName())
+            .append("（群 ID ")
+            .append(groupId)
+            .append("）\n");
+        briefing.append("近期群消息：\n");
+        for (ContextMessage message : history.recentMessages(actor, projectId, groupId, RECENT_MESSAGES)) {
+            briefing.append(messageLine(message));
         }
+        return briefing.toString();
+    }
+
+    private String projectContext(
+        StringBuilder briefing, Long actor, Long projectId, Long groupId, Long agentId) {
         briefing.append("当前项目记忆（memory.md 全文）：\n")
             .append(projectMemory.get(actor, projectId).getContent())
             .append('\n');

@@ -74,7 +74,6 @@ final class RunLifecycle {
             }
             work.openedWorkspaces.forEach(
                 workspaceId -> sessions.release(workspaceId, work.rootRunId));
-            runs.finishRoot(run, status, result, rounds);
             return status;
         }
     }

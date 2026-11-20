@@ -46,6 +46,28 @@ class CodingToolsTest {
     }
 
     @Test
+    void uniqueReplacementReadsTheCurrentVersionAndPreservesConflicts() {
+        when(files.readFile(id, "x.txt", 1, 1)).thenReturn(ok(Map.of("sha256", hash)));
+        ToolResult conflict = ToolResult.error("EDIT_TEXT_AMBIGUOUS", "multiple matches");
+        when(files.editFile(id, "x.txt", hash, "old", "new", false)).thenReturn(conflict);
+
+        assertThat(tools.replaceUniqueText("x.txt", "old", "new")).isSameAs(conflict);
+
+        var order = inOrder(files);
+        order.verify(files).readFile(id, "x.txt", 1, 1);
+        order.verify(files).editFile(id, "x.txt", hash, "old", "new", false);
+        order.verifyNoMoreInteractions();
+    }
+
+    @Test
+    void uniqueReplacementDoesNotWriteWhenReadingFails() {
+        ToolResult missing = ToolResult.error("FILE_NOT_FOUND", "file missing");
+        when(files.readFile(id, "x.txt", 1, 1)).thenReturn(missing);
+        assertThat(tools.replaceUniqueText("x.txt", "old", "new")).isSameAs(missing);
+        verify(files, never()).editFile(any(), anyString(), anyString(), anyString(), anyString(), anyBoolean());
+    }
+
+    @Test
     void modelSchemaUsesWindowsAndHidesInternalHashesAndOldTools() {
         var definitions =
                 java.util.Arrays.stream(ToolCallbacks.from(tools))

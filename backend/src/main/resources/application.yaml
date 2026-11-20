@@ -65,10 +65,12 @@ app:
   agent:
     # 每次 Agent loop 的最大轮次，防止工具调用无限继续。
     max-rounds: ${APP_AGENT_MAX_ROUNDS:30}
+    model-idle-timeout: ${APP_AGENT_MODEL_IDLE_TIMEOUT:45s}
+    focused-edit-enabled: ${APP_AGENT_FOCUSED_EDIT_ENABLED:true}
     # 同一步中已声明可并行工具的最大在途数；1 表示串行执行。
     max-parallel-tool-calls: ${APP_AGENT_MAX_PARALLEL_TOOL_CALLS:4}
-    # 每个根运行同时活跃的子 Agent 数量上限。
-    max-subagents: ${APP_AGENT_MAX_SUBAGENTS:8}
+    # 默认只运行主 Agent。配置为正数后允许主 Agent 按需委派。
+    max-subagents: ${APP_AGENT_MAX_SUBAGENTS:0}
     # 每个项目的 Agent 数量上限，含默认 Agent 与待审批申请；被拒绝的申请不占名额。
     max-per-project: ${APP_AGENT_MAX_PER_PROJECT:10}
     context:

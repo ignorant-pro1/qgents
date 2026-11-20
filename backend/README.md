@@ -63,7 +63,8 @@ Docker 连不上时后端照样能启动，只有需要沙箱的工具会失败�
 ## 功能
 
 - 群聊：团队 → 项目 → 多个群，消息、提及、回复、已读、置顶；只有 @ 了群内 Agent 的消息才启动运行，普通聊天不调用模型。
-- Agent 运行：自研工具循环，默认最多 30 轮，单步最多 4 个工具并行，可后台派生子 Agent（默认上限 8 个），运行中可以按消息取消。
+- Agent 运行：群聊消息和 Agent 待运行记录同事务写入 MySQL，排队任务可在服务重启后继续领取。默认由主 Agent 执行，最多 30 个模型轮次，单步最多 4 个工具并行。设置 `APP_AGENT_MAX_SUBAGENTS` 为正数可开启委派。排队和运行期间都可以按消息取消。
+- 单文件替换：默认 Agent 接到路径与新旧文本都明确的请求（如「把 `src/main.py` 里的 `hello world` 改成 `hello qgents`」）时，优先使用精简的文件工具。需要更多项目上下文时可以在同一次运行中恢复完整工作流。可用 `APP_AGENT_FOCUSED_EDIT_ENABLED=false` 关闭。
 - 沙箱：用户命令跑在临时容器里，默认 2 核 / 4 GiB，空闲 30 分钟回收、最长闲置 2 小时，单条命令默认 15 分钟超时、上限 1 小时。
 - 三层记忆：项目共享的 `memory.md`、群记忆 `groups/<groupId>/memory.md`、Agent 私有记忆 `agent-memory/<agentId>/<groupId>.md`，都存在项目数据目录里，不是数据库表单。
 - 项目知识：项目 Skill、跨群历史检索、图片与文本附件（单个上限 50 MB，存本地磁盘或阿里云 OSS）。
@@ -137,6 +138,8 @@ docker-compose.yml          本地依赖、生产部署与可选 profile
 Linux 和 macOS 要把 `.env` 的 `SANDBOX_DOCKER_HOST` 改成 `unix:///var/run/docker.sock`，并让 `PROJECT_DATA_ROOT` 与 `PROJECT_DATA_DOCKER_HOST_ROOT` 指向同一个宿主机目录。Windows 用默认的 named pipe，路径写正斜杠。
 
 数据库表只在数据卷第一次初始化时创建。之后 `qgents_schema.sql` 新增了表，要么手动补进库，要么 `docker compose down -v` 重建（会清数据）。
+
+已有数据库升级时，执行一次 `src/main/resources/db/migrations/001_agent_run_queue_index.sql`，为待执行任务的扫描添加索引。
 
 ## 配置 GitHub App
 

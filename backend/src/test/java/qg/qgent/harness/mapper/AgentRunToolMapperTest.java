@@ -44,6 +44,7 @@ class AgentRunToolMapperTest {
                         .getMappedStatement(AgentRunToolMapper.class.getName() + ".byRunIds")
                         .getBoundSql(Map.of("runIds", List.of(TestIds.next(), TestIds.next())))
                         .getSql();
-        assertThat(sql).contains("FROM agent_run_tools WHERE run_id IN", "? , ?", "ORDER BY id");
+        assertThat(sql).matches(
+            "(?s)SELECT .* WHERE run_id IN\\s*\\(\\s*\\?\\s*,\\s*\\?\\s*\\)\\s*ORDER BY id");
     }
 }

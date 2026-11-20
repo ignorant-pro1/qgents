@@ -7,10 +7,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -27,6 +27,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
@@ -44,7 +45,6 @@ import qg.qgent.agent.service.AgentService;
 import qg.qgent.attachment.service.AttachmentService;
 import qg.qgent.chat.dto.ContextMessage;
 import qg.qgent.chat.entity.ChatGroupEntity;
-import qg.qgent.chat.event.MessageSentEvent;
 import qg.qgent.chat.service.ChatHistoryService;
 import qg.qgent.chat.service.CrossGroupAccessService;
 import qg.qgent.chat.service.GroupService;
@@ -55,6 +55,7 @@ import qg.qgent.github.tool.GitHubCapability;
 import qg.qgent.harness.briefing.BriefingService;
 import qg.qgent.harness.entity.AgentRunEntity;
 import qg.qgent.harness.entity.RunStatus;
+import qg.qgent.harness.service.AgentRunCompletion;
 import qg.qgent.harness.service.AgentRunService;
 import qg.qgent.memory.dto.GroupMemoryResponse;
 import qg.qgent.memory.dto.ProjectMemoryResponse;
@@ -108,7 +109,7 @@ class AgentChatServiceTest {
                                         "image/png",
                                         2048L)));
 
-        fixture.service().replyToMention(fixture.event(), fixture.agentId(), "看看图片");
+        fixture.execute("看看图片");
 
         org.mockito.ArgumentCaptor<Prompt> prompts =
                 org.mockito.ArgumentCaptor.forClass(Prompt.class);
@@ -129,15 +130,60 @@ class AgentChatServiceTest {
                 project = TestIds.next(),
                 group = TestIds.next(),
                 message = TestIds.next();
-        Long agent = TestIds.next();
         ChatModel model = model();
         when(model.call(any(Prompt.class))).thenReturn(reply("已收到"));
         var fixture = fixture(model, actor, project, group, message, childExecutor);
 
-        fixture.service().replyToMention(fixture.event(), agent, "你好");
+        fixture.execute("你好");
 
-        verify(fixture.runs()).startRoot(agent, fixture.event(), "你好");
-        verify(fixture.messages()).sendAsAgent(eq(agent), eq(group), any());
+        verify(fixture.messages()).sendAgentRunReply(fixture.agentId(), group, message,
+                fixture.root().getId(), "已收到");
+    }
+
+    @Test
+    void singleAgentOmitsDelegationTools() {
+        Long actor = TestIds.next(), project = TestIds.next(), group = TestIds.next(), message = TestIds.next();
+        ChatModel model = model();
+        when(model.call(any(Prompt.class))).thenReturn(reply("已收到"));
+        var fixture = fixture(model, actor, project, group, message, childExecutor, 0);
+
+        fixture.execute("你好");
+
+        ArgumentCaptor<Prompt> request = ArgumentCaptor.forClass(Prompt.class);
+        verify(model).call(request.capture());
+        var options = (OpenAiChatOptions) request.getValue().getOptions();
+        assertThat(options.getToolCallbacks()).extracting(tool -> tool.getToolDefinition().name())
+                .contains("cancel_agent").doesNotContain("start_subagent", "wait_subagent");
+    }
+
+    @Test
+    void focusedEditCanRestoreStandardWorkflowWithinTheSameConversation() {
+        Long actor = TestIds.next(), project = TestIds.next(), group = TestIds.next(), message = TestIds.next();
+        ChatModel model = model();
+        when(model.call(any(Prompt.class))).thenReturn(toolCall("use_standard_workflow", "{}"), reply("完成"));
+        var fixture = fixture(model, actor, project, group, message, childExecutor, 0);
+        AgentEntity agent = fixture.agents().requireActiveProjectAgent(project, fixture.agentId());
+        agent.setDefaultAgent(true);
+        agent.setSystemPrompt(null);
+
+        fixture.execute("请把 `src/main.py` 里的 `hello world` 改成 `hello qgents`");
+
+        ArgumentCaptor<Prompt> prompts = ArgumentCaptor.forClass(Prompt.class);
+        verify(model, times(2)).call(prompts.capture());
+        Prompt focused = prompts.getAllValues().getFirst();
+        Prompt standard = prompts.getAllValues().getLast();
+        assertThat(((OpenAiChatOptions) focused.getOptions()).getToolCallbacks())
+            .extracting(tool -> tool.getToolDefinition().name())
+            .containsExactlyInAnyOrder("replace_file_text", "read_file", "edit_file", "run_command",
+                "command_output", "use_standard_workflow");
+        assertThat(focused.getInstructions()).extracting(Message::getText)
+            .anySatisfy(text -> assertThat(text).contains("# 项目约定").doesNotContain("近期群消息"));
+        assertThat(standard.getInstructions()).extracting(Message::getText)
+            .anySatisfy(text -> assertThat(text).contains("近期群消息"));
+        assertThat(((OpenAiChatOptions) standard.getOptions()).getToolCallbacks())
+            .extracting(tool -> tool.getToolDefinition().name())
+            .contains("list_workspace_repositories", "activate_skill")
+            .doesNotContain("replace_file_text", "use_standard_workflow");
     }
 
     @Test
@@ -151,7 +197,7 @@ class AgentChatServiceTest {
         var fixture = fixture(model, actor, project, group, message, childExecutor);
         when(fixture.agentMemories().view(project, fixture.agentId())).thenReturn("# 你负责后端接口");
 
-        fixture.service().replyToMention(fixture.event(), fixture.agentId(), "记住分工");
+        fixture.execute("记住分工");
 
         org.mockito.ArgumentCaptor<Prompt> prompts =
                 org.mockito.ArgumentCaptor.forClass(Prompt.class);
@@ -178,7 +224,7 @@ class AgentChatServiceTest {
         when(model.call(any(Prompt.class))).thenReturn(reply("收到"));
         var fixture = fixture(model, actor, project, group, message, childExecutor);
 
-        fixture.service().replyToMention(fixture.event(), fixture.agentId(), "开始评审");
+        fixture.execute("开始评审");
 
         org.mockito.ArgumentCaptor<Prompt> prompts =
                 org.mockito.ArgumentCaptor.forClass(Prompt.class);
@@ -204,11 +250,10 @@ class AgentChatServiceTest {
                                 "Agent 未启用或不属于本项目"));
 
         assertThatThrownBy(() ->
-                        fixture.service().replyToMention(fixture.event(), fixture.agentId(), "你好"))
+                        fixture.execute("你好"))
                 .isInstanceOf(ApiException.class);
 
-        verify(fixture.runs(), never()).startRoot(any(), any(), any());
-        verify(fixture.messages(), never()).sendAsAgent(any(), any(), any());
+        verify(fixture.messages(), never()).sendAgentRunReply(any(), any(), any(), any(), any());
         verify(model, never()).call(any(Prompt.class));
     }
 
@@ -223,13 +268,11 @@ class AgentChatServiceTest {
         when(model.call(any(Prompt.class))).thenReturn(reply(""));
         var fixture = fixture(model, actor, project, group, message, childExecutor);
 
-        fixture.service().replyToMention(fixture.event(), fixture.agentId(), "帮我申请一个评审助手");
+        fixture.execute("帮我申请一个评审助手");
 
         verify(fixture.messages())
-                .sendAsAgent(
-                        eq(fixture.agentId()),
-                        eq(group),
-                        argThat(request -> "模型返回了空回复".equals(request.getContent().get("text"))));
+                .sendAgentRunReply(eq(fixture.agentId()), eq(group), eq(message),
+                        eq(fixture.root().getId()), eq("模型返回了空回复"));
         // 失败与取消一样要等自己名下的命令停下；成功运行不停（见 successfulRunDoesNotStopItsCommands）。
         verify(fixture.sessions()).stopExecutionsByAgentRun(fixture.root().getId());
         assertThat(fixture.root().getStatus()).isEqualTo(RunStatus.FAILED);
@@ -295,8 +338,7 @@ class AgentChatServiceTest {
         var fixture = fixture(model, actor, project, group, message, childExecutor);
         var future =
                 rootExecutor.submit(() ->
-                        fixture.service()
-                                .replyToMention(fixture.event(), fixture.agentId(), "请完成工作"));
+                        fixture.execute("请完成工作"));
 
         assertTrue(childStarted.await(5, TimeUnit.SECONDS));
         assertTrue(rootFinishedText.await(5, TimeUnit.SECONDS));
@@ -323,10 +365,8 @@ class AgentChatServiceTest {
                         "write_project_memory")
                 .contains("read_attachment");
         verify(fixture.messages())
-                .sendAsAgent(
-                        eq(fixture.agentId()),
-                        eq(group),
-                        argThat(request -> "已汇总子任务结果".equals(request.getContent().get("text"))));
+                .sendAgentRunReply(eq(fixture.agentId()), eq(group), eq(message),
+                        eq(fixture.root().getId()), eq("已汇总子任务结果"));
     }
 
     @Test
@@ -339,7 +379,7 @@ class AgentChatServiceTest {
         when(model.call(any(Prompt.class))).thenReturn(reply("已了解"));
         var fixture = fixture(model, actor, project, group, message, childExecutor);
 
-        fixture.service().replyToMention(fixture.event(), fixture.agentId(), "后端群最近怎么样？");
+        fixture.execute("后端群最近怎么样？");
 
         org.mockito.ArgumentCaptor<Prompt> prompts =
                 org.mockito.ArgumentCaptor.forClass(Prompt.class);
@@ -386,14 +426,12 @@ class AgentChatServiceTest {
                                 new ContextMessage(
                                         1L, "TEXT", "USER", actor.toString(), "昨天完成登录联调")));
 
-        fixture.service().replyToMention(fixture.event(), fixture.agentId(), "后端群最近怎么样？");
+        fixture.execute("后端群最近怎么样？");
 
         assertThat(toolResult.get()).contains("昨天完成登录联调");
         verify(fixture.messages())
-                .sendAsAgent(
-                        eq(fixture.agentId()),
-                        eq(group),
-                        argThat(request -> "后端群昨天完成登录联调".equals(request.getContent().get("text"))));
+                .sendAgentRunReply(eq(fixture.agentId()), eq(group), eq(message),
+                        eq(fixture.root().getId()), eq("后端群昨天完成登录联调"));
     }
 
     @Test
@@ -449,8 +487,7 @@ class AgentChatServiceTest {
 
         var future =
                 rootExecutor.submit(() ->
-                        fixture.service()
-                                .replyToMention(fixture.event(), fixture.agentId(), "安排并整合"));
+                        fixture.execute("安排并整合"));
         future.get(5, TimeUnit.SECONDS);
 
         assertThat(childCalls.get()).as("root calls: %s", rootCalls.get()).isEqualTo(2);
@@ -538,8 +575,7 @@ class AgentChatServiceTest {
 
         var future =
                 rootExecutor.submit(() ->
-                        fixture.service()
-                                .replyToMention(fixture.event(), fixture.agentId(), "安排并整合"));
+                        fixture.execute("安排并整合"));
         assertTrue(childFinishStarted.await(5, TimeUnit.SECONDS));
         assertTrue(rootReachedThirdCall.await(5, TimeUnit.SECONDS));
         assertThat(childRunId.get()).isNotNull();
@@ -622,8 +658,7 @@ class AgentChatServiceTest {
 
         var future =
                 rootExecutor.submit(() ->
-                        fixture.service()
-                                .replyToMention(fixture.event(), fixture.agentId(), "并行分析代码"));
+                        fixture.execute("并行分析代码"));
         try {
             assertTrue(
                     codeCalls.await(5, TimeUnit.SECONDS),
@@ -726,7 +761,7 @@ class AgentChatServiceTest {
                     return Map.of("ok", true, "files", List.of(), "truncated", false);
                 });
 
-        fixture.service().replyToMention(fixture.event(), fixture.agentId(), "分别处理两个工作区");
+        fixture.execute("分别处理两个工作区");
 
         assertThat(locations).hasSize(2);
         assertThat(locations.get(fixture.root().getId()))
@@ -812,9 +847,7 @@ class AgentChatServiceTest {
 
         var future =
                 rootExecutor.submit(() ->
-                        fixture.service()
-                                .replyToMention(
-                                        fixture.event(), fixture.agentId(), "限制同时子 Agent 数"));
+                        fixture.execute("限制同时子 Agent 数"));
         try {
             assertTrue(childStarted.await(5, TimeUnit.SECONDS));
             assertFalse(future.isDone(), "root waits for its accepted child before completing");
@@ -915,8 +948,7 @@ class AgentChatServiceTest {
 
         var future =
                 rootExecutor.submit(() ->
-                        fixture.service()
-                                .replyToMention(fixture.event(), fixture.agentId(), "停止一个子任务"));
+                        fixture.execute("停止一个子任务"));
         try {
             assertTrue(firstChildStopAwaiting.await(5, TimeUnit.SECONDS));
             assertTrue(rootContinuedAfterStop.await(5, TimeUnit.SECONDS));
@@ -1014,8 +1046,7 @@ class AgentChatServiceTest {
 
         var future =
                 rootExecutor.submit(() ->
-                        fixture.service()
-                                .replyToMention(fixture.event(), fixture.agentId(), "准备可取消运行"));
+                        fixture.execute("准备可取消运行"));
         try {
             assertTrue(childStarted.await(5, TimeUnit.SECONDS));
             var cancelRequest = Executors.newSingleThreadExecutor();
@@ -1102,7 +1133,7 @@ class AgentChatServiceTest {
                             run.setResult(invocation.getArgument(2));
                             int rounds = invocation.getArgument(3);
                             run.setRounds((run.getRounds() == null ? 0 : run.getRounds()) + rounds);
-                            return null;
+                            return true;
                         })
                 .when(fixture.runs())
                 .finish(
@@ -1121,8 +1152,7 @@ class AgentChatServiceTest {
 
         var future =
                 rootExecutor.submit(() ->
-                        fixture.service()
-                                .replyToMention(fixture.event(), fixture.agentId(), "停止结算中的子任务"));
+                        fixture.execute("停止结算中的子任务"));
         try {
             assertTrue(stopResponseReturned.await(5, TimeUnit.SECONDS));
             releaseChildFinish.countDown();
@@ -1208,8 +1238,7 @@ class AgentChatServiceTest {
 
         var future =
                 rootExecutor.submit(() ->
-                        fixture.service()
-                                .replyToMention(fixture.event(), fixture.agentId(), "完成子任务后取消"));
+                        fixture.execute("完成子任务后取消"));
         try {
             assertTrue(rootModelBlocked.await(5, TimeUnit.SECONDS));
             cancellationSignal.get().run();
@@ -1278,8 +1307,7 @@ class AgentChatServiceTest {
 
         rootExecutor
                 .submit(() ->
-                        fixture.service()
-                                .replyToMention(fixture.event(), fixture.agentId(), "并行分析代码"))
+                        fixture.execute("并行分析代码"))
                 .get(5, TimeUnit.SECONDS);
         return new WorkspaceRun(fixture, workspace, childCalls);
     }
@@ -1332,7 +1360,7 @@ class AgentChatServiceTest {
         root.setTriggerMessageId(message);
         root.setCreatedBy(actor);
         root.setStatus(RunStatus.RUNNING);
-        when(runs.startRoot(any(), any(), any())).thenReturn(root);
+        when(runs.findRun(root.getId())).thenReturn(root);
         when(runs.startChild(any(), any(), any()))
                 .thenAnswer(
                         invocation -> run(invocation.getArgument(0), invocation.getArgument(1)));
@@ -1357,7 +1385,7 @@ class AgentChatServiceTest {
                             run.setResult(invocation.getArgument(2));
                             int rounds = invocation.getArgument(3);
                             run.setRounds((run.getRounds() == null ? 0 : run.getRounds()) + rounds);
-                            return null;
+                            return true;
                         })
                 .when(runs)
                 .finishRoot(
@@ -1376,14 +1404,6 @@ class AgentChatServiceTest {
         var groupMemory = mock(GroupMemoryService.class);
         when(groupMemory.read(any(), any()))
                 .thenReturn(new GroupMemoryResponse("1", "2", "# 群约定", null));
-        Long replyMessageId = TestIds.next();
-        when(messages.sendAsAgent(anyLong(), anyLong(), any()))
-                .thenAnswer(invocation -> {
-                    var reply = new qg.qgent.chat.dto.MessageResponse();
-                    reply.setId(replyMessageId.toString());
-                    reply.setGroupId(group.toString());
-                    return reply;
-                });
         var agentMemories = mock(AgentMemoryService.class);
         when(agentMemories.view(any(), any())).thenReturn("# 你的分工");
         BriefingService briefing =
@@ -1408,7 +1428,7 @@ class AgentChatServiceTest {
                         briefing,
                         skills,
                         history,
-                        messages,
+                        new AgentRunCompletion(runs, messages),
                         runs,
                         streams,
                         sessions,
@@ -1422,11 +1442,10 @@ class AgentChatServiceTest {
                         agents,
                         agentApplications,
                         childExecutor,
-                        maxSubagents);
-        MessageSentEvent event = new MessageSentEvent(actor, project, group, message, List.of());
+                        maxSubagents,
+                        true);
         return new Fixture(
                 service,
-                event,
                 agentId,
                 messages,
                 runs,
@@ -1435,7 +1454,6 @@ class AgentChatServiceTest {
                 codeAccess,
                 sessions,
                 attachments,
-                replyMessageId,
                 groups,
                 history,
                 agentMemories,
@@ -1544,7 +1562,6 @@ class AgentChatServiceTest {
 
     private record Fixture(
             AgentChatService service,
-            MessageSentEvent event,
             Long agentId,
             MessageService messages,
             AgentRunService runs,
@@ -1553,10 +1570,14 @@ class AgentChatServiceTest {
             SandboxFiles codeAccess,
             SandboxSessionManager sessions,
             AttachmentService attachments,
-            Long replyMessageId,
             GroupService groups,
             ChatHistoryService history,
             AgentMemoryService agentMemories,
             AgentService agents,
-            AgentApplicationService agentApplications) {}
+            AgentApplicationService agentApplications) {
+        void execute(String instruction) {
+            root.setInstruction(instruction);
+            service.executeRoot(root);
+        }
+    }
 }

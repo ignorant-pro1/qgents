@@ -34,8 +34,8 @@ public interface AgentRunToolMapper extends BaseMapper<AgentRunToolEntity> {
     @Select({
         "<script>",
         "SELECT * FROM agent_run_tools WHERE run_id IN",
-        "(<foreach collection='runIds' item='runId' open='(' separator=',' ",
-        "close=')'>#{runId}</foreach>)",
+        "<foreach collection='runIds' item='runId' open='(' separator=',' close=')'>",
+        "#{runId}</foreach>",
         "ORDER BY id",
         "</script>"
     })

@@ -247,6 +247,7 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     finished_at DATETIME(6) NULL,
     KEY idx_agent_run_group (group_id, created_at),
+    KEY idx_agent_run_queue (status, id),
     KEY idx_agent_run_parent (parent_run_id),
     KEY idx_agent_run_message (trigger_message_id, status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Agent loop 根运行及 subagent 运行';

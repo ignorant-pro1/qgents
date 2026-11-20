@@ -420,7 +420,8 @@ public class AgentStreamService {
      * 运行已结束时不会再有工具事件，库里残留的 running 按中性的“结束”返回。
      */
     private static String toolState(String state, RunStatus runStatus) {
-        boolean terminal = runStatus != RunStatus.RUNNING && runStatus != RunStatus.CANCELLING;
+        boolean terminal = runStatus != RunStatus.QUEUED
+            && runStatus != RunStatus.RUNNING && runStatus != RunStatus.CANCELLING;
         return terminal && "running".equals(state) ? "done" : state;
     }
 
@@ -615,11 +616,12 @@ public class AgentStreamService {
                 if (state.closed) return;
                 flush(state, true);
                 state.closed = true;
-                long revision = state.root.revision(state.run.getId()).incrementAndGet();
-                emit(
-                    state,
-                    "agent-run.updated",
-                    updatedPayload(state, state.run.getStatus(), revision));
+                RunStatus status = state.run.getStatus();
+                if (status == RunStatus.SUCCEEDED || status == RunStatus.FAILED
+                    || status == RunStatus.CANCELLED) {
+                    long revision = state.root.revision(state.run.getId()).incrementAndGet();
+                    emit(state, "agent-run.updated", updatedPayload(state, status, revision));
+                }
             }
             live.remove(state.run.getId(), state);
             drainPublishes(state);

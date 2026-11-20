@@ -27,7 +27,7 @@ public class AgentRunSnapshot {
     private String agentId;
     private String triggerMessageId;
 
-    @Schema(description = "RUNNING/CANCELLING/CANCELLED/SUCCEEDED/FAILED")
+    @Schema(description = "QUEUED/RUNNING/CANCELLING/CANCELLED/SUCCEEDED/FAILED")
     private String status;
 
     @Schema(description = "内存中当前模型轮次；不在本进程内存时为 0")

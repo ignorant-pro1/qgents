@@ -114,6 +114,21 @@ public class CodingTools {
             files.editFile(id, path, hash, oldText, newText, Boolean.TRUE.equals(replaceAll)));
     }
 
+    /** 旧文本已知时，把版本读取和一次带版本条件的替换合在同一工具调用内。 */
+    public ToolResult replaceUniqueText(String path, String oldText, String newText) {
+        path = resolveFile(path);
+        if (oldText == null || oldText.isEmpty() || newText == null)
+            throw new IllegalArgumentException("oldText 不能为空，newText 不能为 null");
+        Long id = workspaceId();
+        ToolResult snapshot = files.readFile(id, path, 1, 1);
+        if (!Boolean.TRUE.equals(snapshot.get("ok"))) return snapshot;
+        if (Thread.currentThread().isInterrupted())
+            return ToolResult.error("AGENT_CANCELLED", "Agent 运行已取消");
+        if (!(snapshot.get("sha256") instanceof String hash) || hash.isBlank())
+            return ToolResult.error("FILE_VERSION_UNAVAILABLE", "未取得文件版本，请重新读取");
+        return outcome(path, files.editFile(id, path, hash, oldText, newText, false));
+    }
+
     @Tool(
         name = "apply_patch",
         description = "对已读取文件应用 unified diff。文件版本由系统保存；补丁必须精确匹配，失败后重新读取或改用 edit_file。")
